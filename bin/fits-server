@@ -1,0 +1,29 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
+
+require 'fits_jruby'
+
+config = FitsJruby::Config.new
+begin
+  config.validate!
+rescue FitsJruby::Config::Error => e
+  warn "configuration error: #{e.message}"
+  exit 1
+end
+
+metrics = FitsJruby::Metrics.new
+examiner = FitsJruby::FitsExaminer.new(config.fits_home)
+handler = FitsJruby::RequestHandler.new(examiner: examiner, metrics: metrics)
+server = FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics)
+
+shutdown = proc do
+  server.stop
+  exit 0
+end
+Signal.trap('INT', &shutdown)
+Signal.trap('TERM', &shutdown)
+
+server.start
+sleep
