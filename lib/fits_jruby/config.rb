@@ -24,6 +24,8 @@ module FitsJruby
 
     def queue_capacity
       Integer(@env.fetch('FITS_QUEUE_CAPACITY', DEFAULT_QUEUE_CAPACITY))
+    rescue ArgumentError, TypeError
+      raise Error, "invalid queue capacity: #{@env['FITS_QUEUE_CAPACITY']}"
     end
 
     def log_level
@@ -41,7 +43,20 @@ module FitsJruby
         raise Error, "invalid log level: #{log_level} (expected one of #{VALID_LOG_LEVELS.join(', ')})"
       end
 
+      validate_queue_capacity!
+
       self
+    end
+
+    private
+
+    def validate_queue_capacity!
+      capacity = queue_capacity
+      raise Error, 'invalid queue capacity: must be positive' if capacity <= 0
+    rescue Error
+      raise
+    rescue ArgumentError, TypeError
+      raise Error, "invalid queue capacity: #{@env['FITS_QUEUE_CAPACITY']}"
     end
   end
 end

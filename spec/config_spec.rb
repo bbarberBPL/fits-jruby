@@ -59,4 +59,25 @@ RSpec.describe FitsJruby::Config do
     expect { described_class.new(env('FITS_LOG_LEVEL' => 'verbose')).validate! }
       .to raise_error(FitsJruby::Config::Error, /log level/i)
   end
+
+  it 'validate! raises on a non-numeric FITS_QUEUE_CAPACITY' do
+    expect { described_class.new(env('FITS_QUEUE_CAPACITY' => 'not_a_number')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
+  end
+
+  it 'validate! raises on a zero queue capacity' do
+    expect { described_class.new(env('FITS_QUEUE_CAPACITY' => '0')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
+  end
+
+  it 'validate! raises on a negative queue capacity' do
+    expect { described_class.new(env('FITS_QUEUE_CAPACITY' => '-5')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
+  end
+
+  it 'queue_capacity raises Config::Error, not ArgumentError, on non-numeric value' do
+    config = described_class.new(env('FITS_QUEUE_CAPACITY' => 'bad_value'))
+    expect { config.queue_capacity }
+      .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
+  end
 end
