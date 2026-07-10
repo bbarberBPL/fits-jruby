@@ -98,6 +98,9 @@ The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'
 Boot validation: if `FITS_HOME` is missing or does not contain `lib/`, log a
 clear message and exit non-zero — do not start.
 
+The `/tmp/fits.sock` default is for local development. In production the socket
+lives at `/run/fits/fits.sock` (see DEPLOYMENT.md), set via `FITS_SOCKET_PATH`.
+
 ## Protocol & Data Flow
 
 ### Startup
@@ -246,14 +249,41 @@ frequently.
   server survives a handler that raises; metrics counters move as expected.
 
 ### Slow integration suite (tagged `:integration`, excluded by default)
-- Constructs the **real `Fits`** once and examines 1–2 small real sample files
-  in `spec/fixtures/`, asserting output is well-formed XML starting with `<?xml`
-  and containing expected FITS elements.
+- Constructs the **real `Fits`** once and examines the small sample files in
+  `spec/fixtures/`, asserting output is well-formed XML starting with `<?xml`
+  and containing expected FITS elements (correct MIME type per format).
 - End-to-end: boot the real server on a temp socket, connect as a client, send a
-  fixture path, assert real FITS XML comes back.
+  fixture path, assert real FITS XML comes back; also send `STATS` and assert the
+  JSON snapshot.
 
 `.rspec`/`spec_helper` tags integration out of the default run; run it with
 `rspec --tag integration` (or a rake task) in CI / pre-commit.
+
+**Resource-mindful integration testing.** FITS spawns multiple analysis tools
+per file and, unconstrained, will claim a large heap (its own launcher defaults
+to `-Xmx6G`). To avoid exhausting system CPU/RAM during tests:
+- The integration suite runs the FITS instance with a **constrained heap**
+  (e.g. `-Xmx512m`, which is empirically sufficient for the small fixtures) and
+  **strictly serially** — one examination at a time, matching production.
+- Fixtures are deliberately **tiny** (see below) so each examination is fast and
+  cheap; the suite never processes large media.
+- The suite is **opt-in** (tagged, off by default) so the fast unit loop stays
+  free of JVM cost and no one accidentally runs heavy examinations in a tight
+  loop.
+
+### Test fixtures (`spec/fixtures/`)
+Small synthetic files representative of the formats normally processed, kept
+intentionally tiny (a few KB each) to keep the repo lean and integration tests
+cheap:
+- `sample.tif` — 32×32 uncompressed baseline TIFF (~6 KB).
+- `sample.jp2` — 32×32 JPEG 2000 (~0.5 KB).
+- `sample.mp4` — 1-second 64×64 H.264 / MP4 (~3 KB).
+- `sample.mov` — 1-second 64×64 QuickTime MOV (~3 KB).
+
+These were generated with ImageMagick, OpenJPEG, and ffmpeg; a rake task
+(`rake fixtures`) can regenerate them so they are reproducible rather than
+opaque binaries. Larger real-world files can be dropped in locally for ad-hoc
+testing but are not committed.
 
 ## Linting & Dependency Auditing
 
@@ -265,6 +295,35 @@ frequently.
 - Both wired into rake tasks (`rake lint`, `rake audit`).
 - CI gate order: `rubocop` -> `bundle-audit` -> fast specs -> integration specs.
 
+## JVM & Garbage Collection Tuning (production)
+
+The server is a single long-lived JVM doing serial, short-lived examinations, so
+the goals are: small, predictable heap; low pause times; and prompt return of
+memory to the OS. Recommended production `JAVA_OPTS` (documented in
+DEPLOYMENT.md, overridable via env):
+
+- **Heap:** `-Xms256m -Xmx1g`. FITS runs comfortably under a modest heap for
+  ordinary files (a 512 MB heap examined the sample TIFF successfully); 1 GB max
+  gives headroom for larger media while staying far below the stock `-Xmx6G`.
+  Setting `-Xms` equal-ish avoids growth churn. Tune `-Xmx` up only if `STATS`
+  shows `heap_used_bytes` pushing `heap_max_bytes`.
+- **Collector:** **G1GC** (`-XX:+UseG1GC`, default on JDK 17) with
+  `-XX:MaxGCPauseMillis=200`. G1 suits a small-to-moderate heap with low-pause
+  goals and is the safe, well-understood default. (ZGC is unnecessary here — it
+  targets very large heaps and adds overhead we do not need.)
+- **Return memory to the OS:** `-XX:+UseG1GC` plus
+  `-XX:G1PeriodicGCInterval=...` / `-XX:+ExplicitGCInvokesConcurrent` are
+  optional; the pragmatic lever is `-XX:MinHeapFreeRatio`/`-XX:MaxHeapFreeRatio`
+  to let the heap shrink between bursts. Documented as optional tuning.
+- **Container awareness:** if deployed in a container, rely on JDK 17's
+  automatic cgroup detection (or set `-XX:MaxRAMPercentage=50`) instead of a
+  fixed `-Xmx`.
+- **Fail-fast on OOM:** `-XX:+ExitOnOutOfMemoryError` so systemd restarts a
+  wedged process rather than leaving it thrashing.
+
+These are starting points; DEPLOYMENT.md explains how to observe `STATS` heap
+figures and adjust.
+
 ## Documentation (junior-dev readable)
 
 - **README.md** — what it is; quick start; the socket protocol with concrete
@@ -275,17 +334,38 @@ frequently.
 - **INSTALL.md** — step-by-step for a junior dev: install JRuby 9.4.15.0
   (rbenv) + JDK 17; obtain and unzip FITS; set env vars; run the server; verify
   with a sample request.
-- **DEPLOYMENT.md** — production guide:
-  - **Security:** run as an unprivileged user; socket file permissions/ownership
-    so only the app user can connect; scope filesystem access; no network
-    exposure (Unix socket only); resource limits.
+- **DEPLOYMENT.md** — production guide, targeted at **Ubuntu 22.04 + systemd**:
+  - **Service user & socket location:** create a dedicated unprivileged system
+    user/group (e.g. `fits`). Place the socket under `/run` (the modern path;
+    `/var/run` is a symlink to `/run` on Ubuntu 22.04) in a service-owned
+    subdirectory managed by systemd `RuntimeDirectory=fits`, which creates
+    `/run/fits` on start and removes it on stop. Socket path:
+    `/run/fits/fits.sock` (set `FITS_SOCKET_PATH` accordingly).
+  - **Secure permissions:** `RuntimeDirectoryMode=0750` and a socket `umask`
+    yielding `0660`, both owned by `fits:fits`. Grant only the calling app's
+    account access by adding it to the `fits` group (or via
+    `SupplementaryGroups`), so the socket is reachable by the app and no one
+    else. No world access; no network exposure (Unix socket only).
+  - **Hardened systemd unit** — a complete sample `fits.service` with:
+    `User=fits`, `Group=fits`, `RuntimeDirectory=fits`,
+    `RuntimeDirectoryMode=0750`, `UMask=0117`; the `JAVA_OPTS` GC/heap settings
+    from the JVM section; `Environment=` for `FITS_HOME`, `FITS_SOCKET_PATH`,
+    `FITS_QUEUE_CAPACITY`, `FITS_LOG_LEVEL`; hardening directives
+    (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
+    `PrivateTmp=yes`, `ReadOnlyPaths=` for `FITS_HOME`, `ReadWritePaths=` only
+    where needed, `RestrictAddressFamilies=AF_UNIX`, `MemoryMax=` as a hard
+    ceiling matching `-Xmx` headroom); `Restart=on-failure`; and journald
+    logging (`StandardOutput=journal`).
+  - **Filesystem access scoping:** the files FITS examines must be readable by
+    the `fits` user; document granting read access to the relevant media
+    directories via `ReadOnlyPaths=`/group membership, keeping everything else
+    inaccessible.
   - **Performance:** the warm-instance rationale; app-level queue + kernel
-    backlog behavior under concurrent Sidekiq load; JVM heap tuning (`-Xmx`) for
-    minimal heap; when to consider a FITS-instance pool later.
-  - **Monitoring:** how to poll `STATS`, what each field means, and which
-    signals (rising `queue_depth`, growing `heap_used_bytes`, error rate) to
-    alert on.
-  - A sample systemd unit.
+    backlog behavior under concurrent Sidekiq load; the JVM/GC tuning above; when
+    to consider a FITS-instance pool later.
+  - **Monitoring:** how to poll `STATS` (e.g. via `socat`/a small script), what
+    each field means, and which signals (rising `queue_depth`, growing
+    `heap_used_bytes`, error rate) to alert on.
 
 ## Repository Layout (initial)
 
@@ -302,7 +382,7 @@ fits-jruby/
 │       └── socket_server.rb
 ├── spec/
 │   ├── spec_helper.rb
-│   ├── fixtures/              # small sample files for integration tests
+│   ├── fixtures/              # tiny sample files (tif, jp2, mp4, mov)
 │   ├── config_spec.rb
 │   ├── metrics_spec.rb
 │   ├── request_handler_spec.rb
@@ -314,6 +394,7 @@ fits-jruby/
 ├── INSTALL.md
 ├── DEPLOYMENT.md
 ├── Gemfile
+├── Rakefile                   # lint, audit, fixtures, integration tasks
 ├── .rubocop.yml
 ├── .rspec
 ├── .ruby-version
