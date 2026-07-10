@@ -75,7 +75,7 @@ The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'
 | Variable           | Default                      | Purpose                                   |
 |--------------------|------------------------------|-------------------------------------------|
 | `FITS_HOME`        | *(required)*                 | Path to the FITS install (must contain `lib/`). |
-| `FITS_SOCKET_PATH` | `/tmp/fits.sock` *(tunable)* | Filesystem path for the Unix socket.      |
+| `FITS_SOCKET_PATH` | `/tmp/fits.sock`             | Filesystem path for the Unix socket.      |
 | `FITS_SOCKET_BACKLOG` | `64`                      | Kernel listen backlog (queued connections). |
 
 Boot validation: if `FITS_HOME` is missing or does not contain `lib/`, log a
