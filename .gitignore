@@ -1,0 +1,27 @@
+# Claude Code / Superpowers (local tooling — collaborators use their own config)
+.claude/
+.superpowers/
+
+# Environment / secrets
+.env
+*.key
+*.pem
+
+# Ruby / Bundler
+/.bundle/
+/vendor/bundle/
+/pkg/
+*.gem
+
+# RSpec / test artifacts
+/coverage/
+/tmp/
+/spec/examples.txt
+
+# FITS runtime artifacts
+fits.log
+*.sock
+
+# Editor / OS
+.DS_Store
+*.swp
