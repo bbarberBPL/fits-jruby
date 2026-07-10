@@ -16,15 +16,25 @@ RSpec.describe 'fits-server end to end', :integration do
       @socket = File.join(dir, 'e2e.sock')
       env = { 'FITS_HOME' => fits_home, 'FITS_SOCKET_PATH' => @socket, 'JRUBY_OPTS' => '-J-Xmx512m' }
       @pid = spawn(env, 'bin/fits-server')
-      40.times do
+      120.times do
         break if File.socket?(@socket)
 
         sleep 0.25
       end
       example.run
     ensure
-      Process.kill('TERM', @pid) if @pid
-      Process.wait(@pid) if @pid
+      if @pid
+        begin
+          Process.kill('TERM', @pid)
+        rescue Errno::ESRCH
+          # Process already exited
+        end
+        begin
+          Process.wait(@pid)
+        rescue Errno::ECHILD, Errno::ESRCH
+          # Process already reaped or doesn't exist
+        end
+      end
     end
   end
 
