@@ -104,7 +104,7 @@ Environment=FITS_LOG_LEVEL=info
 
 # JVM heap and GC tuning. Tune -Xmx up only if STATS shows heap_used_bytes
 # approaching heap_max_bytes. See "Monitoring" below.
-Environment=JAVA_OPTS=-Xms256m -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+ExitOnOutOfMemoryError
+Environment="JAVA_OPTS=-Xms256m -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+ExitOnOutOfMemoryError"
 
 # -- Hardening --------------------------------------------------------------
 NoNewPrivileges=yes
