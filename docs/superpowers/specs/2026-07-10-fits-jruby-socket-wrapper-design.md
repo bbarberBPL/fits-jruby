@@ -24,12 +24,15 @@ Nailgun was explicitly rejected: it is unmaintained and deprecated.
 - Run lightweight with minimal JVM heap.
 - Be callable from a Sidekiq job in a separate application.
 - Test-driven with RSpec; a fast unit loop plus a slower integration suite.
+- Observable: structured per-request logging and a queryable metrics command.
 
 ## Non-Goals (YAGNI for v1)
 
 - Streaming raw file *bytes* over the socket (path-only for now).
 - Persistent multi-request connections (one request per connection).
-- Parallel processing of multiple files (serial; see Concurrency).
+- Parallel *examination* of multiple files (a single serial worker; see
+  Concurrency). Note: an acceptor thread runs alongside the worker for queuing,
+  but only one FITS examination happens at a time.
 - The standardized/combined XML output format (native FITS XML only).
 - Downloading/installing FITS (a bootstrap script may come later).
 
@@ -54,19 +57,31 @@ Each component has one clear responsibility and a well-defined interface.
   the fast unit tests free of JVM/FITS cost.
 
 - **`RequestHandler`** — pure protocol logic; no sockets, no FITS. Given a raw
-  request string, it validates the path and delegates to an examiner, returning
-  either XML bytes (success) or a plain error string (failure). Fully
-  unit-testable with a mock examiner.
+  request string, it classifies the request as either an examination (an
+  absolute path) or the `STATS` command. For an examination it validates the
+  path and delegates to an examiner, returning XML bytes or a plain error
+  string. For `STATS` it delegates to `Metrics` and returns a JSON blob. Fully
+  unit-testable with a mock examiner and a mock metrics source.
 
-- **`SocketServer`** — owns the `UNIXServer` lifecycle: bind (with a generous
-  backlog), serial `accept` loop, read request -> `RequestHandler` -> write
-  response -> close connection. Handles `SIGINT`/`SIGTERM` for clean shutdown
-  and socket-file cleanup. The accept loop is bulletproof: any per-request
-  error is caught, logged, and returned to that client; the server never dies
-  from a single bad request.
+- **`Metrics`** — an in-process, thread-safe counters/gauges object. Tracks
+  totals (requests, successes, errors), current queue depth, whether a request
+  is currently processing, process uptime, and JVM heap (used/max via
+  `java.lang.management.ManagementFactory.getMemoryMXBean`). Exposes
+  `#snapshot -> Hash` which the `STATS` command renders to JSON. No sockets,
+  no FITS — unit-testable in isolation.
 
-- **`bin/fits-server`** — thin executable: load `Config` -> build
-  `FitsExaminer` -> start `SocketServer`.
+- **`SocketServer`** — owns the `UNIXServer` lifecycle and the app-level queue.
+  An **acceptor thread** calls `accept` continuously and pushes each accepted
+  connection onto a bounded in-process queue (updating the `Metrics` queue-depth
+  gauge). A **single worker thread** drains the queue serially: read request ->
+  `RequestHandler` -> write response -> close connection -> update `Metrics`.
+  Only one FITS examination runs at a time (serial guarantee preserved).
+  Handles `SIGINT`/`SIGTERM` for clean shutdown and socket-file cleanup. The
+  worker loop is bulletproof: any per-request error is caught, logged, and
+  returned to that client; the server never dies from a single bad request.
+
+- **`bin/fits-server`** — thin executable: load `Config` -> build `Metrics` ->
+  build `FitsExaminer` -> start `SocketServer`.
 
 The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'`).
 
@@ -76,7 +91,9 @@ The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'
 |--------------------|------------------------------|-------------------------------------------|
 | `FITS_HOME`        | *(required)*                 | Path to the FITS install (must contain `lib/`). |
 | `FITS_SOCKET_PATH` | `/tmp/fits.sock`             | Filesystem path for the Unix socket.      |
-| `FITS_SOCKET_BACKLOG` | `64`                      | Kernel listen backlog (queued connections). |
+| `FITS_SOCKET_BACKLOG` | `64`                      | Kernel listen backlog for the `UNIXServer` (pre-accept cushion). |
+| `FITS_QUEUE_CAPACITY` | `64`                      | Max app-level queue depth; `accept`ed connections beyond this wait on the kernel backlog. |
+| `FITS_LOG_LEVEL`   | `info`                       | Logging verbosity (`debug`/`info`/`warn`/`error`). |
 
 Boot validation: if `FITS_HOME` is missing or does not contain `lib/`, log a
 clear message and exit non-zero — do not start.
@@ -86,24 +103,33 @@ clear message and exit non-zero — do not start.
 ### Startup
 1. `bin/fits-server` loads `Config` from env vars and validates `FITS_HOME`.
 2. Adds the FITS jars to the JRuby classpath and sets `Fits.FITS_HOME`.
-3. Builds `FitsExaminer` -> constructs the one warm `Fits` instance (slow, once).
+3. Builds `Metrics`, then `FitsExaminer` -> constructs the one warm `Fits`
+   instance (slow, once), recording process start time for uptime.
 4. `SocketServer` unlinks any stale socket file, binds `UNIXServer` at
-   `FITS_SOCKET_PATH` with the configured backlog, logs "ready".
+   `FITS_SOCKET_PATH` with the configured backlog, starts the acceptor and
+   worker threads, logs "ready".
 
-### Per request (serial accept loop)
-1. `accept` a connection. Other connections wait in the kernel backlog — this
-   is how concurrent Sidekiq jobs queue safely (see Concurrency).
-2. Read the request: a single **absolute file path terminated by a newline
-   (`\n`)**. The path is stripped of surrounding whitespace.
-3. `RequestHandler` validates: non-empty, absolute, exists, is a regular file,
-   is readable. On any failure it returns plain error text.
-4. On valid input, delegate to `examiner.examine(path)`.
-5. On success, write the native FITS XML bytes. On any FITS exception, write
-   plain error text (e.g. `ERROR: examination failed: <message>`).
-6. Close the connection (one request per connection).
-7. Loop back to `accept`.
+### Per request (acceptor thread + single serial worker)
+1. The **acceptor thread** `accept`s a connection and enqueues it (incrementing
+   the queue-depth gauge). If the app queue is full, further connections wait on
+   the kernel backlog — this is how concurrent Sidekiq jobs queue safely (see
+   Concurrency).
+2. The **worker thread** dequeues a connection (decrementing the gauge, marking
+   "processing"), then reads the request: a single line terminated by a newline
+   (`\n`), stripped of surrounding whitespace.
+3. `RequestHandler` classifies the line:
+   - If it equals `STATS` -> return the metrics JSON snapshot (see below).
+   - Otherwise treat it as a file path and validate: non-empty, absolute,
+     exists, is a regular file, is readable. On any failure return plain error
+     text.
+4. For a valid path, delegate to `examiner.examine(path)`.
+5. On success write the native FITS XML bytes and increment the success counter.
+   On any FITS exception write plain error text
+   (e.g. `ERROR: examination failed: <message>`) and increment the error counter.
+6. Close the connection (one request per connection), clear "processing".
+7. Loop back to dequeue.
 
-### Client contract
+### Client contract (examination)
 Connect -> write `"/abs/path/to/file\n"` -> read until EOF.
 - **Success:** well-formed XML beginning with `<?xml`.
 - **Failure:** a plain-text line that does not begin with `<?xml`.
@@ -112,27 +138,55 @@ Because success always starts with `<?xml` and errors never do, the client
 distinguishes the two with a simple prefix check — no need to parse XML just to
 detect failure.
 
+### Client contract (metrics)
+Connect -> write `"STATS\n"` -> read until EOF. The response is a single JSON
+object, for example:
+
+```json
+{
+  "uptime_seconds": 3820,
+  "requests_total": 1502,
+  "requests_success": 1487,
+  "requests_error": 15,
+  "queue_depth": 3,
+  "processing": true,
+  "heap_used_bytes": 268435456,
+  "heap_max_bytes": 1073741824
+}
+```
+
+`STATS` never runs FITS and does not count toward the examination
+success/error counters (it is a control command, not a data request).
+
 ### Shutdown
 On `SIGINT`/`SIGTERM`: stop accepting, close the socket, unlink the socket
 file, exit.
 
 ## Concurrency & Queuing
 
-The server processes requests **serially** — one warm `Fits` instance, one
-connection at a time — to honor the minimal-heap constraint and to sidestep
-FITS thread-safety questions.
+The server processes examinations **serially** — one warm `Fits` instance, one
+file at a time — to honor the minimal-heap constraint and to sidestep FITS
+thread-safety questions. Serial processing is preserved even though there are
+two threads: only the single worker thread ever calls `examine`.
 
-Concurrency safety comes for free from the OS. A Unix domain socket has a
-kernel-level **listen backlog**. While one connection is being processed,
-additional connections (e.g. from multiple Sidekiq workers) are **not**
-refused — the kernel holds them in the backlog queue and `accept` hands them
-to us one at a time, FIFO. With a backlog of 64, up to 64 concurrent Sidekiq
-jobs can be waiting without connection errors; each simply waits its turn.
-Latency under burst is roughly the sum of the jobs ahead of you in the queue.
+Queuing is handled at the **application level** (rather than relying solely on
+the kernel backlog) so that queue depth is exactly observable via `STATS`:
+
+- An **acceptor thread** `accept`s connections as fast as they arrive and pushes
+  each onto a bounded in-process queue (`FITS_QUEUE_CAPACITY`, default 64),
+  incrementing the queue-depth gauge.
+- A **single worker thread** drains the queue FIFO, processing one request at a
+  time and decrementing the gauge.
+
+Concurrent Sidekiq jobs therefore queue rather than fail: they connect, the
+acceptor enqueues them immediately, and the worker serves them one at a time in
+order. If the app queue reaches capacity, additional connections wait in the
+kernel listen backlog (a second cushion) instead of being refused. Latency under
+burst is roughly the sum of the jobs ahead of you in the queue.
 
 **This queuing behavior must be documented prominently** so callers understand
-that concurrent jobs queue rather than fail, and that per-request latency grows
-with queue depth.
+that concurrent jobs queue rather than fail, that per-request latency grows with
+queue depth, and that `queue_depth` from `STATS` is the metric to watch.
 
 Future scaling (out of scope for v1): if serial throughput is insufficient,
 introduce a small pool of N `Fits` instances on worker threads for genuine
@@ -149,24 +203,47 @@ FITS behind `FitsExaminer`.
 | Relative path                               | `ERROR: path must be absolute: <path>`, close.                 |
 | File not found / not a regular file / unreadable | `ERROR: <reason>: <path>`, close.                         |
 | FITS throws mid-examination                 | Catch, `ERROR: examination failed: <message>`, close; server stays up. |
-| Client disconnects mid-write                | Log, drop that connection, continue accept loop.               |
-| Unexpected exception in handler             | Caught at accept-loop level; log full backtrace, close that connection; server stays up. |
+| Client disconnects mid-write                | Log, drop that connection, continue the worker loop.           |
+| Unexpected exception in worker              | Caught at worker-loop level; log full backtrace, close that connection; server stays up. |
+| Exception in acceptor thread                | Caught and logged; acceptor keeps accepting; a fatal socket error triggers clean shutdown. |
 
-**Key principle:** the accept loop is bulletproof. Only boot-time config
-failure exits the process. Logging goes to stdout/stderr so systemd/journald or
-Docker captures it — no separate log file to manage.
+**Key principle:** the worker loop is bulletproof. Only boot-time config
+failure exits the process. Per-request errors still increment the error counter
+(except `STATS`, which is a control command).
+
+## Logging
+
+Structured, line-oriented logs to **stdout/stderr** so systemd/journald or
+Docker captures them — no separate log file to manage. Level is set via
+`FITS_LOG_LEVEL` (default `info`).
+
+- **Startup/shutdown** (`info`): config summary (FITS home, socket path, queue
+  capacity), "ready", signal received, clean-shutdown steps.
+- **Per examination** (`info`): one line on completion with path, outcome
+  (`success`/`error`), and `duration_ms`; the error message on failure.
+- **Enqueue/dequeue** (`debug`): queue depth transitions, useful when tuning.
+- **Unexpected exceptions** (`error`): full backtrace.
+
+Each log line includes a timestamp and level. `STATS` requests are logged at
+`debug` only, to avoid polluting examination logs when a monitor polls
+frequently.
 
 ## Testing (RSpec, TDD, Layered)
 
 ### Fast unit suite (default `rspec` run — no JVM/FITS cost)
 - **`RequestHandler`** — path validation (empty, relative, missing, not-a-file,
   unreadable); success delegates to the examiner; a FITS exception becomes error
-  text. Uses a **mock examiner**.
-- **`Config`** — env var parsing, defaults, fail-fast on bad `FITS_HOME`.
+  text; `STATS` returns the metrics JSON and does not touch the examiner. Uses a
+  **mock examiner** and a **mock metrics source**.
+- **`Metrics`** — counter/gauge increments and decrements; `#snapshot` shape and
+  keys; success/error tallies; uptime and heap fields present. (Heap values come
+  from the real JVM MXBean, so assert presence/type rather than exact numbers.)
+- **`Config`** — env var parsing, defaults, fail-fast on bad `FITS_HOME`;
+  queue-capacity and log-level parsing.
 - **`SocketServer`** — connection lifecycle against a real `UNIXServer` but with
   a **fake examiner**: connect -> send path -> assert response bytes ->
-  connection closed; malformed-request handling; server survives a handler that
-  raises.
+  connection closed; a `STATS` request returns JSON; malformed-request handling;
+  server survives a handler that raises; metrics counters move as expected.
 
 ### Slow integration suite (tagged `:integration`, excluded by default)
 - Constructs the **real `Fits`** once and examines 1–2 small real sample files
@@ -193,7 +270,8 @@ Docker captures it — no separate log file to manage.
 - **README.md** — what it is; quick start; the socket protocol with concrete
   request examples (newline-terminated path via `nc`, `socat`, and a Ruby
   client snippet in Sidekiq style); env var reference; success-vs-error output
-  contract; the backlog/queuing behavior for concurrent callers.
+  contract; the queuing behavior for concurrent callers; the `STATS` command
+  with an example JSON response and a Ruby snippet to query it.
 - **INSTALL.md** — step-by-step for a junior dev: install JRuby 9.4.15.0
   (rbenv) + JDK 17; obtain and unzip FITS; set env vars; run the server; verify
   with a sample request.
@@ -201,9 +279,12 @@ Docker captures it — no separate log file to manage.
   - **Security:** run as an unprivileged user; socket file permissions/ownership
     so only the app user can connect; scope filesystem access; no network
     exposure (Unix socket only); resource limits.
-  - **Performance:** the warm-instance rationale; backlog/queuing behavior under
-    concurrent Sidekiq load; JVM heap tuning (`-Xmx`) for minimal heap; when to
-    consider a FITS-instance pool later.
+  - **Performance:** the warm-instance rationale; app-level queue + kernel
+    backlog behavior under concurrent Sidekiq load; JVM heap tuning (`-Xmx`) for
+    minimal heap; when to consider a FITS-instance pool later.
+  - **Monitoring:** how to poll `STATS`, what each field means, and which
+    signals (rising `queue_depth`, growing `heap_used_bytes`, error rate) to
+    alert on.
   - A sample systemd unit.
 
 ## Repository Layout (initial)
@@ -216,12 +297,14 @@ fits-jruby/
 │   └── fits_jruby/
 │       ├── config.rb
 │       ├── fits_examiner.rb
+│       ├── metrics.rb
 │       ├── request_handler.rb
 │       └── socket_server.rb
 ├── spec/
 │   ├── spec_helper.rb
 │   ├── fixtures/              # small sample files for integration tests
 │   ├── config_spec.rb
+│   ├── metrics_spec.rb
 │   ├── request_handler_spec.rb
 │   ├── socket_server_spec.rb
 │   └── integration/
