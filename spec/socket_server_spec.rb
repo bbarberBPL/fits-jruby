@@ -89,4 +89,64 @@ RSpec.describe FitsJruby::SocketServer do
   ensure
     server&.stop
   end
+
+  # ── Fix 1: idempotent stop ────────────────────────────────────────────────
+
+  it 'does not raise when stop is called twice' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+    expect { server.stop }.not_to raise_error
+    expect { server.stop }.not_to raise_error
+  end
+
+  it 'removes the socket file and rejects new connections after stop' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+    server.stop
+    expect(File.exist?(@socket_path)).to be(false)
+    expect { UNIXSocket.new(@socket_path) }.to raise_error(Errno::ENOENT, /No such file/)
+  end
+
+  # ── Fix 2: graceful drain — in-flight response is never truncated ─────────
+
+  it 'delivers the complete response for an in-flight request when stop is called concurrently' do
+    xml_body = ('X' * 4096)
+    large_xml = "<?xml version=\"1.0\"?>#{xml_body}</fits>"
+    latch_start = Queue.new   # signals when examine has been entered
+    latch_resume = Queue.new  # signals examine to return
+
+    slow_examiner = Object.new
+    slow_examiner.define_singleton_method(:examine) do |_path|
+      latch_start.push(:ready)
+      latch_resume.pop # block until the test lets us proceed
+      large_xml
+    end
+
+    server, = build_server(slow_examiner)
+    server.start
+    wait_for_socket
+
+    response = nil
+    client_thread = Thread.new do
+      Tempfile.create(['s', '.tif']) do |file|
+        response = request(file.path)
+      end
+    end
+
+    # Wait until examine is running, then trigger stop.
+    latch_start.pop
+    stop_thread = Thread.new { server.stop }
+
+    # Let examine return so the worker can finish writing the full response.
+    latch_resume.push(:go)
+
+    client_thread.join(10)
+    stop_thread.join(10)
+
+    expect(response).to start_with('<?xml')
+    expect(response).to end_with('</fits>')
+    expect(response.length).to eq(large_xml.length)
+  end
 end

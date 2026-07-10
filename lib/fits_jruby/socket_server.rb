@@ -9,6 +9,9 @@ module FitsJruby
   # pushes them onto a bounded queue; a single worker thread drains the queue
   # serially, so only one examination runs at a time.
   class SocketServer
+    # Sentinel pushed onto the queue to signal the worker to shut down.
+    SHUTDOWN = Object.new.freeze
+
     def initialize(config:, handler:, metrics:, logger: nil)
       @config = config
       @handler = handler
@@ -16,6 +19,8 @@ module FitsJruby
       @logger = logger || default_logger(config.log_level)
       @queue = SizedQueue.new(config.queue_capacity)
       @running = false
+      @stopped = false
+      @stop_mutex = Mutex.new
     end
 
     def socket_path
@@ -26,21 +31,49 @@ module FitsJruby
       remove_stale_socket
       @server = UNIXServer.new(socket_path)
       @running = true
+      @stopped = false
       @worker = Thread.new { worker_loop }
       @acceptor = Thread.new { acceptor_loop }
       @logger.info("ready: listening on #{socket_path} (queue capacity #{@config.queue_capacity})")
     end
 
+    # Idempotent: safe to call multiple times or from concurrent signal handlers.
+    # Never raises.
     def stop
+      @stop_mutex.synchronize do
+        return if @stopped
+
+        @stopped = true
+      end
+
       @running = false
-      @acceptor&.kill
-      @worker&.kill
-      @server&.close
+      drain_worker         # push sentinel so worker exits after current serve
+      close_server_socket  # unblocks the acceptor (closed socket raises IOError)
       remove_stale_socket
+      join_acceptor
       @logger.info('stopped')
     end
 
     private
+
+    def close_server_socket
+      @server&.close
+    rescue IOError, Errno::EBADF
+      # already closed; harmless
+    end
+
+    def drain_worker
+      @queue.push(SHUTDOWN) if @worker
+      return unless @worker && !@worker.join(5)
+
+      @logger.warn('worker did not stop in 5s; killing')
+      @worker.kill
+    end
+
+    def join_acceptor
+      @acceptor&.join(1)
+      @acceptor&.kill
+    end
 
     def acceptor_loop
       while @running
@@ -57,18 +90,27 @@ module FitsJruby
     end
 
     def worker_loop
-      while @running
-        begin
-          connection = @queue.pop
-          next unless connection
+      loop do
+        connection = @queue.pop
+        break if connection.equal?(SHUTDOWN)
 
+        begin
           @metrics.dequeue
           @metrics.processing = true
           serve(connection)
+        rescue StandardError => e
+          @logger.error("worker loop error: #{e.class}: #{e.message}")
         ensure
           @metrics.processing = false
+          safe_close(connection)
         end
       end
+    end
+
+    def safe_close(connection)
+      connection.close if connection.respond_to?(:close) && !connection.closed?
+    rescue IOError, Errno::EBADF
+      nil
     end
 
     def serve(connection)
