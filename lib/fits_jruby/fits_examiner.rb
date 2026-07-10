@@ -7,9 +7,7 @@ module FitsJruby
   # and reuses it for every examination.
   class FitsExaminer
     def initialize(fits_home)
-      @fits_home = fits_home
       load_fits_jars(fits_home)
-      java_import 'edu.harvard.hul.ois.fits.Fits'
       Java::EduHarvardHulOisFits::Fits.FITS_HOME = fits_home
       @fits = Java::EduHarvardHulOisFits::Fits.new(fits_home)
     end
@@ -27,7 +25,7 @@ module FitsJruby
     private
 
     def load_fits_jars(fits_home)
-      Dir.glob(File.join(fits_home, 'lib', '**', '*.jar')).each do |jar|
+      Dir.glob(File.join(fits_home, 'lib', '**', '*.jar')).sort.each do |jar| # rubocop:disable Lint/RedundantDirGlobSort
         require jar
       end
     end
