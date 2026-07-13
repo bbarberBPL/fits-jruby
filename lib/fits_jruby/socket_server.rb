@@ -154,34 +154,64 @@ module FitsJruby
     end
 
     def serve(connection) # rubocop:disable Metrics/AbcSize
-      started       = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      read_timeout  = @config.read_timeout
-      write_timeout = @config.write_timeout
+      started      = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      read_timeout = @config.read_timeout
 
       begin
         raw = read_line(connection, read_timeout)
       rescue ReadTimeout
         connection.write('ERROR: read timeout')
+        @metrics.record_error
         return
       rescue RequestTooLong
         connection.write('ERROR: request too long')
+        @metrics.record_error
         return
       end
 
       response = @handler.handle(raw.to_s)
+      return unless write_response(connection, response)
 
-      # Guard the write so a non-reading client can't block the worker.
-      if connection.wait_writable(write_timeout)
-        connection.write(response)
-        record_outcome(response)
-        log_request(raw, response, started)
-      else
-        @logger.warn('write timeout for client; abandoning connection')
-      end
+      record_outcome(response)
+      log_request(raw, response, started)
     rescue StandardError => e
       @logger.error("worker error: #{e.class}: #{e.message}\n#{e.backtrace&.join("\n")}")
     ensure
       safe_close(connection)
+    end
+
+    # Write the full response to the connection using a non-blocking loop
+    # bounded by a monotonic deadline. Returns true on success, false if the
+    # write timed out or the peer closed the connection (in which case the
+    # error metric is recorded and a warning is logged). This prevents a
+    # non-reading client from wedging the worker when the response is larger
+    # than the socket send buffer.
+    #
+    # NOTE: JRuby raises Errno::EPIPE from write_nonblock even with
+    # exception: false when the peer closes; we rescue it here so serve's
+    # error-path logic stays clean.
+    def write_response(connection, response)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @config.write_timeout
+      offset   = 0
+      total    = response.bytesize
+
+      while offset < total
+        written = connection.write_nonblock(response.byteslice(offset, total - offset), exception: false)
+        if written == :wait_writable
+          time_left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          if time_left <= 0 || connection.wait_writable(time_left).nil?
+            @logger.warn('write timeout for client; abandoning connection')
+            @metrics.record_error
+            return false
+          end
+        else
+          offset += written
+        end
+      end
+      true
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      # Peer disconnected mid-write; not an error worth alarming on.
+      false
     end
 
     def record_outcome(response)

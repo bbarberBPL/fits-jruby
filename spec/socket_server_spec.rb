@@ -197,6 +197,113 @@ RSpec.describe FitsJruby::SocketServer do
     server&.stop
   end
 
+  # ── Fix (bounded write): write_response loop terminates on timeout ──────────
+  #
+  # NOTE: SO_RCVBUF is not settable on Unix domain sockets on Linux —
+  # setsockopt raises Errno::ENOPROTOOPT (the option is only valid for IP
+  # sockets). Instead, write_response is tested at the unit level using a
+  # pre-filled real socket pair, and the worker-not-wedged invariant is
+  # separately exercised via an integration test with a large response.
+
+  it 'write_response returns false and records error when the write buffer is saturated' do
+    reader, writer = UNIXSocket.pair
+
+    begin
+      # Fill reader's receive buffer by writing to writer until :wait_writable.
+      fill = 'x' * 65_536
+      loop do
+        break if writer.write_nonblock(fill, exception: false) == :wait_writable
+      end
+
+      # Instantiate the server but do NOT start it; write_response only needs
+      # @config (write_timeout) and @metrics.
+      server, metrics = build_server(FakeExaminer.new, 'FITS_WRITE_TIMEOUT' => '1')
+      result = server.send(:write_response, writer, 'hello world')
+
+      expect(result).to be(false)
+      expect(metrics.snapshot[:requests_error]).to eq(1)
+    ensure
+      reader.close rescue nil # rubocop:disable Style/RescueModifier
+      writer.close rescue nil # rubocop:disable Style/RescueModifier
+    end
+  end
+
+  it 'does not wedge the worker when a client stops reading a large response' do
+    # SO_RCVBUF is unsettable on Unix domain sockets; write_timeout unit
+    # coverage is in the test above.  This test guards the critical invariant:
+    # the worker must still serve subsequent requests after a slow client.
+    large_xml = "<?xml #{'a' * 600_000}"
+    server, = build_server(FakeExaminer.new(xml: large_xml), 'FITS_WRITE_TIMEOUT' => '1')
+    server.start
+    wait_for_socket
+
+    Tempfile.create(['test', '.tif']) do |tmp|
+      sock = UNIXSocket.new(@socket_path)
+      begin
+        sock.write("#{tmp.path}\n")
+        # Do NOT read — let write_timeout (1 s) fire or buffer to saturate.
+        sleep 2
+      rescue IOError, Errno::ECONNRESET, Errno::EPIPE
+        nil # server may close the connection during timeout handling
+      ensure
+        sock.close rescue nil # rubocop:disable Style/RescueModifier
+      end
+    end
+
+    # Critical invariant: worker must still be alive regardless of whether
+    # the write timed out or succeeded.
+    Tempfile.create(['s', '.tif']) do |file|
+      expect(request(file.path)).to start_with('<?xml')
+    end
+  ensure
+    server&.stop
+  end
+
+  # ── Fix (metrics): error counter incremented on read-timeout / oversize / write-timeout ──
+
+  it 'increments requests_error after a read timeout' do
+    server, metrics = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    UNIXSocket.open(@socket_path, &:read)
+
+    expect(metrics.snapshot[:requests_error]).to eq(1)
+    expect(metrics.snapshot[:requests_success]).to eq(0)
+  ensure
+    server&.stop
+  end
+
+  it 'increments requests_success after a normal success and does not increment error' do
+    server, metrics = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    Tempfile.create(['s', '.tif']) do |file|
+      expect(request(file.path)).to start_with('<?xml')
+    end
+
+    expect(metrics.snapshot[:requests_success]).to eq(1)
+    expect(metrics.snapshot[:requests_error]).to eq(0)
+  ensure
+    server&.stop
+  end
+
+  it 'increments neither success nor error after a STATS request' do
+    server, metrics = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    body = request('STATS')
+    expect(JSON.parse(body)).to include('requests_total')
+
+    snap = metrics.snapshot
+    expect(snap[:requests_success]).to eq(0)
+    expect(snap[:requests_error]).to eq(0)
+  ensure
+    server&.stop
+  end
+
   # ── Fix 2: graceful drain — in-flight response is never truncated ─────────
 
   it 'delivers the complete response for an in-flight request when stop is called concurrently' do
