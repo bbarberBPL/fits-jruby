@@ -101,6 +101,11 @@ Environment=FITS_HOME=/opt/fits-1.6.0
 Environment=FITS_SOCKET_PATH=/run/fits/fits.sock
 Environment=FITS_QUEUE_CAPACITY=64
 Environment=FITS_LOG_LEVEL=info
+# Stalled-client protection: disconnect clients that never send a request
+# line within FITS_READ_TIMEOUT seconds, or never drain the response within
+# FITS_WRITE_TIMEOUT seconds.
+Environment=FITS_READ_TIMEOUT=5
+Environment=FITS_WRITE_TIMEOUT=30
 
 # JVM heap and GC tuning. Tune -Xmx up only if STATS shows heap_used_bytes
 # approaching heap_max_bytes. See "Monitoring" below.
@@ -141,6 +146,14 @@ WantedBy=multi-user.target
 > `/run`. Use `/run/fits/fits.sock` (the canonical path). The `RuntimeDirectory=fits`
 > directive instructs systemd to create `/run/fits` before starting the service
 > and to remove it when the service stops, so no manual `mkdir` is needed.
+
+> **Note on FITS log4j logging:** FITS bundles log4j-core and would normally
+> write a `fits.log` in the working directory. The project ships
+> `config/log4j2.xml`, which replaces the bundled config with a console-only
+> appender targeting stderr. This means no stray `fits.log` is ever created,
+> and all FITS internal log output is captured by journald together with the
+> Ruby logger output (both appear under `journalctl -u fits.service`). No
+> additional configuration is required.
 
 ---
 

@@ -24,15 +24,27 @@ The server logs to stdout and listens on `/tmp/fits.sock` by default. Press
 
 ## Environment variables
 
-| Variable             | Default          | Required | Description                                                                                  |
-|----------------------|------------------|----------|----------------------------------------------------------------------------------------------|
-| `FITS_HOME`          | *(none)*         | **Yes**  | Path to the FITS installation directory. Must contain a `lib/` subdirectory with the FITS jars. |
-| `FITS_SOCKET_PATH`   | `/tmp/fits.sock` | No       | Filesystem path for the Unix domain socket. Use `/run/fits/fits.sock` in production.        |
-| `FITS_QUEUE_CAPACITY`| `64`             | No       | Maximum number of connections that can wait in the application-level queue.                  |
-| `FITS_LOG_LEVEL`     | `info`           | No       | Logging verbosity. One of `debug`, `info`, `warn`, or `error`.                               |
+| Variable              | Default          | Required | Description                                                                                  |
+|-----------------------|------------------|----------|----------------------------------------------------------------------------------------------|
+| `FITS_HOME`           | *(none)*         | **Yes**  | Path to the FITS installation directory. Must contain a `lib/` subdirectory with the FITS jars. |
+| `FITS_SOCKET_PATH`    | `/tmp/fits.sock` | No       | Filesystem path for the Unix domain socket. Use `/run/fits/fits.sock` in production.        |
+| `FITS_QUEUE_CAPACITY` | `64`             | No       | Maximum number of connections that can wait in the application-level queue.                  |
+| `FITS_LOG_LEVEL`      | `info`           | No       | Logging verbosity. One of `debug`, `info`, `warn`, or `error`.                               |
+| `FITS_READ_TIMEOUT`   | `5`              | No       | Seconds to wait for a client to send a complete request line. Clients that connect and never send a newline are disconnected after this timeout, keeping the worker free. |
+| `FITS_WRITE_TIMEOUT`  | `30`             | No       | Seconds to wait for a client to accept the response. Clients that stop reading are abandoned after this timeout so the worker is never wedged. |
 
 The server validates `FITS_HOME` at boot and exits non-zero with a clear error
 message if it is missing or does not contain a `lib/` directory.
+
+## Logging
+
+The server logs to stdout using Ruby's standard `Logger`. FITS's own internal
+logging (via log4j) is redirected to **stderr** through `config/log4j2.xml`,
+which configures a console-only appender with no file appender. This means:
+
+- No stray `fits.log` is ever created in the working directory.
+- All logs (Ruby + FITS) are captured together by your process supervisor
+  (journald, Docker, etc.) from stdout/stderr.
 
 ## Protocol
 
