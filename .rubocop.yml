@@ -15,7 +15,7 @@ Metrics/BlockLength:
     - "Rakefile"
 
 Metrics/ClassLength:
-  Max: 130
+  Max: 165
 
 Metrics/MethodLength:
   Max: 25

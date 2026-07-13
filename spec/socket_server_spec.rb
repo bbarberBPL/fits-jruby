@@ -18,10 +18,16 @@ RSpec.describe FitsJruby::SocketServer do
     end
   end
 
-  def build_server(examiner)
+  # Short timeouts so the timeout-related tests complete quickly.
+  def build_server(examiner, extra_env = {})
     metrics = FitsJruby::Metrics.new(heap_reader: -> { { used: 1, max: 2 } })
     config = FitsJruby::Config.new(
-      'FITS_HOME' => '/unused', 'FITS_SOCKET_PATH' => @socket_path
+      {
+        'FITS_HOME' => '/unused',
+        'FITS_SOCKET_PATH' => @socket_path,
+        'FITS_READ_TIMEOUT' => '1',
+        'FITS_WRITE_TIMEOUT' => '5'
+      }.merge(extra_env)
     )
     handler = FitsJruby::RequestHandler.new(examiner: examiner, metrics: metrics)
     [FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics), metrics]
@@ -107,6 +113,88 @@ RSpec.describe FitsJruby::SocketServer do
     server.stop
     expect(File.exist?(@socket_path)).to be(false)
     expect { UNIXSocket.new(@socket_path) }.to raise_error(Errno::ENOENT, /No such file/)
+  end
+
+  # ── Fix C1: read timeout — stalled client does not wedge the worker ──────
+
+  it 'responds with ERROR: read timeout when client connects but never sends a newline' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    response = nil
+    UNIXSocket.open(@socket_path) do |sock|
+      # Do NOT write anything; wait for server to time out and close the conn.
+      response = sock.read
+    end
+
+    expect(response).to match(/\AERROR: read timeout/)
+
+    # Worker must still be alive: a normal request succeeds afterward.
+    Tempfile.create(['s', '.tif']) do |file|
+      expect(request(file.path)).to start_with('<?xml')
+    end
+  ensure
+    server&.stop
+  end
+
+  # ── Fix C1: oversize line — unbounded input capped, worker keeps serving ─
+
+  it 'rejects an oversize request line and keeps serving subsequent requests' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    # Send more than MAX_REQUEST_BYTES bytes without a newline.
+    oversized = ('A' * (FitsJruby::SocketServer::MAX_REQUEST_BYTES + 100))
+    response = nil
+    begin
+      UNIXSocket.open(@socket_path) do |sock|
+        sock.write(oversized)
+        response = sock.read
+      end
+    rescue Errno::ECONNRESET, Errno::EPIPE, IOError
+      # Server may close the socket while client's send buffer still has data;
+      # on Unix domain sockets this yields ECONNRESET. Both "ERROR: request too
+      # long" and an abrupt close are acceptable rejection responses.
+      nil
+    end
+
+    # If we got a response at all, it must be the expected error message.
+    expect(response).to match(/\AERROR: request too long/) unless response.nil?
+
+    # The important invariant: the worker is still alive.
+    Tempfile.create(['s', '.tif']) do |file|
+      expect(request(file.path)).to start_with('<?xml')
+    end
+  ensure
+    server&.stop
+  end
+
+  # ── Fix I1: worker survives a Java-level Error ────────────────────────────
+
+  it 'survives an examiner that raises a Java Error and keeps serving' do
+    server, = build_server(FakeExaminer.new(raise_java_error: true))
+    server.start
+    wait_for_socket
+
+    Tempfile.create(['s', '.tif']) do |file|
+      # The erroring request: the worker may close without a full response, OR
+      # return an ERROR: line — either is acceptable.
+      begin
+        UNIXSocket.open(@socket_path) do |sock|
+          sock.write("#{file.path}\n")
+          sock.read # may be empty if worker closed early
+        end
+      rescue StandardError
+        nil # connection reset is fine — worker survived is what we test
+      end
+
+      # Worker must still be alive: a STATS request succeeds.
+      expect(request('STATS')).to start_with('{')
+    end
+  ensure
+    server&.stop
   end
 
   # ── Fix 2: graceful drain — in-flight response is never truncated ─────────

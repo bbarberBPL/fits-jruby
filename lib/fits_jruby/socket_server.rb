@@ -12,6 +12,16 @@ module FitsJruby
     # Sentinel pushed onto the queue to signal the worker to shut down.
     SHUTDOWN = Object.new.freeze
 
+    # Maximum bytes read from a single request line before giving up.
+    # File paths are small; this prevents a runaway no-newline stream from
+    # growing the heap unboundedly.
+    MAX_REQUEST_BYTES = 4096
+
+    # Internal error types used only within SocketServer to signal early exits
+    # from read_line back to serve.
+    class ReadTimeout < StandardError; end
+    class RequestTooLong < StandardError; end
+
     def initialize(config:, handler:, metrics:, logger: nil)
       @config = config
       @handler = handler
@@ -98,13 +108,17 @@ module FitsJruby
           @metrics.dequeue
           @metrics.processing = true
           serve(connection)
-        rescue StandardError => e
-          @logger.error("worker loop error: #{e.class}: #{e.message}")
+        rescue Exception => e # rubocop:disable Lint/RescueException
+          # Catches java.lang.Throwable (including Java Errors like
+          # StackOverflowError) that bypass rescue StandardError.
+          @logger.error("worker loop unhandled exception: #{e.class}: #{e.message}\n#{e.backtrace&.join("\n")}")
+          safe_close(connection)
         ensure
           @metrics.processing = false
-          safe_close(connection)
         end
       end
+    ensure
+      @logger.error('worker loop exited unexpectedly while running') if @running
     end
 
     def safe_close(connection)
@@ -113,17 +127,61 @@ module FitsJruby
       nil
     end
 
-    def serve(connection)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      raw = connection.gets
+    # Read a newline-terminated request line with a timeout and size cap.
+    # Returns the line (including trailing newline), nil on EOF/close,
+    # raises ReadTimeout on timeout, raises RequestTooLong when cap exceeded.
+    def read_line(connection, read_timeout) # rubocop:disable Metrics/AbcSize
+      buf = +''
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + read_timeout
+
+      loop do
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        raise ReadTimeout if remaining <= 0
+
+        raise ReadTimeout unless connection.wait_readable(remaining)
+
+        chunk = connection.read_nonblock(MAX_REQUEST_BYTES - buf.length + 1, exception: false)
+        next if chunk == :wait_readable # shouldn't happen after wait_readable, but be safe
+
+        return nil if chunk.nil? # EOF
+
+        buf << chunk
+        newline_idx = buf.index("\n")
+        return buf[0..newline_idx] if newline_idx
+
+        raise RequestTooLong if buf.length >= MAX_REQUEST_BYTES
+      end
+    end
+
+    def serve(connection) # rubocop:disable Metrics/AbcSize
+      started       = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      read_timeout  = @config.read_timeout
+      write_timeout = @config.write_timeout
+
+      begin
+        raw = read_line(connection, read_timeout)
+      rescue ReadTimeout
+        connection.write('ERROR: read timeout')
+        return
+      rescue RequestTooLong
+        connection.write('ERROR: request too long')
+        return
+      end
+
       response = @handler.handle(raw.to_s)
-      connection.write(response)
-      record_outcome(response)
-      log_request(raw, response, started)
+
+      # Guard the write so a non-reading client can't block the worker.
+      if connection.wait_writable(write_timeout)
+        connection.write(response)
+        record_outcome(response)
+        log_request(raw, response, started)
+      else
+        @logger.warn('write timeout for client; abandoning connection')
+      end
     rescue StandardError => e
       @logger.error("worker error: #{e.class}: #{e.message}\n#{e.backtrace&.join("\n")}")
     ensure
-      connection.close if connection && !connection.closed?
+      safe_close(connection)
     end
 
     def record_outcome(response)
