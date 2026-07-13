@@ -80,4 +80,56 @@ RSpec.describe FitsJruby::Config do
     expect { config.queue_capacity }
       .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
   end
+
+  # ── FITS_READ_TIMEOUT ─────────────────────────────────────────────────────
+
+  it 'defaults read_timeout to 5' do
+    expect(described_class.new(env).read_timeout).to eq(5)
+  end
+
+  it 'reads FITS_READ_TIMEOUT override' do
+    expect(described_class.new(env('FITS_READ_TIMEOUT' => '10')).read_timeout).to eq(10)
+  end
+
+  it 'read_timeout raises Config::Error on non-numeric value' do
+    config = described_class.new(env('FITS_READ_TIMEOUT' => 'bad'))
+    expect { config.read_timeout }
+      .to raise_error(FitsJruby::Config::Error, /invalid read timeout/i)
+  end
+
+  it 'validate! raises on zero read timeout' do
+    expect { described_class.new(env('FITS_READ_TIMEOUT' => '0')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid read timeout/i)
+  end
+
+  it 'validate! raises on negative read timeout' do
+    expect { described_class.new(env('FITS_READ_TIMEOUT' => '-1')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid read timeout/i)
+  end
+
+  # ── FITS_WRITE_TIMEOUT ────────────────────────────────────────────────────
+
+  it 'defaults write_timeout to 30' do
+    expect(described_class.new(env).write_timeout).to eq(30)
+  end
+
+  it 'reads FITS_WRITE_TIMEOUT override' do
+    expect(described_class.new(env('FITS_WRITE_TIMEOUT' => '60')).write_timeout).to eq(60)
+  end
+
+  it 'write_timeout raises Config::Error on non-numeric value' do
+    config = described_class.new(env('FITS_WRITE_TIMEOUT' => 'bad'))
+    expect { config.write_timeout }
+      .to raise_error(FitsJruby::Config::Error, /invalid write timeout/i)
+  end
+
+  it 'validate! raises on zero write timeout' do
+    expect { described_class.new(env('FITS_WRITE_TIMEOUT' => '0')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid write timeout/i)
+  end
+
+  it 'validate! raises on negative write timeout' do
+    expect { described_class.new(env('FITS_WRITE_TIMEOUT' => '-2')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /invalid write timeout/i)
+  end
 end
