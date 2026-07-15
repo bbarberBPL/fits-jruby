@@ -25,21 +25,15 @@ module FitsJruby
     end
 
     def queue_capacity
-      Integer(@env.fetch('FITS_QUEUE_CAPACITY', DEFAULT_QUEUE_CAPACITY))
-    rescue ArgumentError, TypeError
-      raise Error, "invalid queue capacity: #{@env['FITS_QUEUE_CAPACITY']}"
+      integer_env('FITS_QUEUE_CAPACITY', DEFAULT_QUEUE_CAPACITY, 'queue capacity')
     end
 
     def read_timeout
-      Integer(@env.fetch('FITS_READ_TIMEOUT', DEFAULT_READ_TIMEOUT))
-    rescue ArgumentError, TypeError
-      raise Error, "invalid read timeout: #{@env['FITS_READ_TIMEOUT']}"
+      integer_env('FITS_READ_TIMEOUT', DEFAULT_READ_TIMEOUT, 'read timeout')
     end
 
     def write_timeout
-      Integer(@env.fetch('FITS_WRITE_TIMEOUT', DEFAULT_WRITE_TIMEOUT))
-    rescue ArgumentError, TypeError
-      raise Error, "invalid write timeout: #{@env['FITS_WRITE_TIMEOUT']}"
+      integer_env('FITS_WRITE_TIMEOUT', DEFAULT_WRITE_TIMEOUT, 'write timeout')
     end
 
     def log_level
@@ -49,13 +43,25 @@ module FitsJruby
     def validate!
       validate_fits_home!
       validate_log_level!
-      validate_queue_capacity!
-      validate_read_timeout!
-      validate_write_timeout!
+      validate_positive!(queue_capacity, 'queue capacity')
+      validate_positive!(read_timeout, 'read timeout')
+      validate_positive!(write_timeout, 'write timeout')
       self
     end
 
     private
+
+    # Parses an integer env var, converting parse failures into Config::Error
+    # with a label-specific message (e.g. "invalid queue capacity: ...").
+    def integer_env(key, default, label)
+      Integer(@env.fetch(key, default))
+    rescue ArgumentError, TypeError
+      raise Error, "invalid #{label}: #{@env[key]}"
+    end
+
+    def validate_positive!(value, label)
+      raise Error, "invalid #{label}: must be positive" if value <= 0
+    end
 
     def validate_fits_home!
       raise Error, 'FITS_HOME must be set' if fits_home.nil? || fits_home.empty?
@@ -69,33 +75,6 @@ module FitsJruby
       return if VALID_LOG_LEVELS.include?(log_level)
 
       raise Error, "invalid log level: #{log_level} (expected one of #{VALID_LOG_LEVELS.join(', ')})"
-    end
-
-    def validate_queue_capacity!
-      capacity = queue_capacity
-      raise Error, 'invalid queue capacity: must be positive' if capacity <= 0
-    rescue Error
-      raise
-    rescue ArgumentError, TypeError
-      raise Error, "invalid queue capacity: #{@env['FITS_QUEUE_CAPACITY']}"
-    end
-
-    def validate_read_timeout!
-      timeout = read_timeout
-      raise Error, 'invalid read timeout: must be positive' if timeout <= 0
-    rescue Error
-      raise
-    rescue ArgumentError, TypeError
-      raise Error, "invalid read timeout: #{@env['FITS_READ_TIMEOUT']}"
-    end
-
-    def validate_write_timeout!
-      timeout = write_timeout
-      raise Error, 'invalid write timeout: must be positive' if timeout <= 0
-    rescue Error
-      raise
-    rescue ArgumentError, TypeError
-      raise Error, "invalid write timeout: #{@env['FITS_WRITE_TIMEOUT']}"
     end
   end
 end
