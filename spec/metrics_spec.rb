@@ -41,6 +41,16 @@ RSpec.describe FitsJruby::Metrics do
     expect(metrics.snapshot[:queue_depth]).to eq(1)
   end
 
+  it 'never drops queue depth below zero on dequeue' do
+    metrics.dequeue
+    expect(metrics.snapshot[:queue_depth]).to eq(0)
+
+    metrics.enqueue
+    metrics.dequeue
+    metrics.dequeue
+    expect(metrics.snapshot[:queue_depth]).to eq(0)
+  end
+
   it 'tracks the processing flag' do
     metrics.processing = true
     expect(metrics.snapshot[:processing]).to be(true)
