@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Project-level log4j2 configuration for the FITS JRuby wrapper.
+
+  This file is injected before the FITS jars initialize log4j via the
+  log4j2.configurationFile system property (set in FitsExaminer#initialize).
+  It replaces the FITS-bundled log4j2.xml, which writes to ./fits.log via a
+  RollingRandomAccessFile appender — that causes a stray tracked file in the
+  project root.
+
+  Goals:
+    * Route all FITS log4j output to SYSTEM_ERR only (unified capture with our
+      Ruby logger; journald / systemd sees everything on stderr together).
+    * Remove the file appender entirely so no fits.log is ever created.
+    * Keep the same per-tool suppression levels as the FITS-bundled config.
+    * No JNDI / lookup constructs (minimise attack surface).
+-->
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="Console" target="SYSTEM_ERR">
+      <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} - %5p - %c{1}:%L - %m%n"/>
+    </Console>
+  </Appenders>
+
+  <Loggers>
+    <!-- FITS tools: suppress everything except errors -->
+    <Logger name="edu.harvard.hul.ois"            level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="edu.harvard.hul.ois.jhove"      level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="uk.gov.nationalarchives.droid"  level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="org.apache.tika"                level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="org.apache.poi"                 level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="net.sf"                         level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+    <Logger name="org.apache.pdfbox"              level="error" additivity="false">
+      <AppenderRef ref="Console" level="error"/>
+    </Logger>
+
+    <Root level="info">
+      <AppenderRef ref="Console" level="error"/>
+    </Root>
+  </Loggers>
+</Configuration>
