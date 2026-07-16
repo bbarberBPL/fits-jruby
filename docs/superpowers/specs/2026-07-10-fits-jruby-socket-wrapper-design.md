@@ -93,6 +93,8 @@ The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'
 | `FITS_SOCKET_PATH` | `/tmp/fits.sock`             | Filesystem path for the Unix socket.      |
 | `FITS_QUEUE_CAPACITY` | `64`                      | Max app-level queue depth; `accept`ed connections beyond this wait on the default kernel backlog. |
 | `FITS_LOG_LEVEL`   | `info`                       | Logging verbosity (`debug`/`info`/`warn`/`error`). |
+| `FITS_READ_TIMEOUT` | `5`                         | Seconds to wait for a client to send its request line before responding `ERROR: read timeout` (stalled-client protection). |
+| `FITS_WRITE_TIMEOUT` | `30`                       | Seconds to wait for a non-reading client to drain the response before abandoning the connection. |
 
 Boot validation: if `FITS_HOME` is missing or does not contain `lib/`, log a
 clear message and exit non-zero — do not start.
