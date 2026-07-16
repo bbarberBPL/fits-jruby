@@ -266,6 +266,26 @@ done
 Pipe this through `jq` for formatted output or into a monitoring system (e.g.
 Prometheus textfile collector, Datadog custom check, or Nagios passive check).
 
+### Dependency security
+
+`rake audit` (`bundle-audit check --update`) scans only `Gemfile.lock` — that is,
+the **Ruby** dependencies of this wrapper. It does **not** see the **Java jars**
+that FITS bundles under `$FITS_HOME/lib` (log4j-core, Tika, PDFBox, and others),
+so CVEs in those jars will not surface in our tooling.
+
+Those jars are FITS's responsibility. Operators should:
+
+- Track FITS releases and apply security updates promptly (a new FITS release is
+  the normal path to updated jars).
+- Optionally scan `$FITS_HOME/lib` with a Java-aware tool such as
+  [OWASP Dependency-Check](https://owasp.org/www-project-dependency-check/) or
+  [`grype`](https://github.com/anchore/grype) as part of a periodic audit.
+
+For context: the bundled `log4j-core` is 2.19.0, which is past the Log4Shell
+(CVE-2021-44228) fix line, and our `config/log4j2.xml` is console-only with no
+message lookups, so that specific attack surface does not apply here. This note
+is about the general blind spot, not a known active vulnerability.
+
 ---
 
 ## JVM and GC tuning

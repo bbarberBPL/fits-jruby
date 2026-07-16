@@ -1,0 +1,45 @@
+name: CI
+
+# Run the quality gate on every push and on pull requests targeting main.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Set up JDK 17 explicitly (Temurin) before Ruby so the JVM that JRuby
+      # runs on is guaranteed and pinned, rather than relying on whatever the
+      # runner image happens to ship.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Install JRuby 9.4.15.0 and cache gems via Bundler.
+      - name: Set up JRuby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: jruby-9.4.15.0
+          bundler-cache: true
+
+      - name: RuboCop
+        run: bundle exec rubocop
+
+      - name: Bundle audit
+        run: bundle exec bundle-audit check --update
+
+      # Unit specs only. Integration specs self-exclude via .rspec
+      # (--tag ~integration) and there is no FITS install on the runner.
+      # Integration coverage runs on a host that has FITS installed
+      # (pre-deploy verification), not in CI.
+      - name: RSpec (unit)
+        run: bundle exec rspec

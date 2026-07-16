@@ -48,7 +48,7 @@ Each component has one clear responsibility and a well-defined interface.
 
 - **`Config`** — reads environment variables with defaults; validates at boot
   (fails fast if `FITS_HOME` is missing or invalid). Exposes typed accessors
-  for FITS home, socket path, and backlog size.
+  for FITS home, socket path, and queue capacity.
 
 - **`FitsExaminer`** — the only component that touches Java/FITS. Constructs
   `new Fits(FITS_HOME)` once and exposes `#examine(path) -> xml_string`
@@ -91,8 +91,7 @@ The Unix socket uses JRuby's stdlib `UNIXServer`/`UNIXSocket` (`require 'socket'
 |--------------------|------------------------------|-------------------------------------------|
 | `FITS_HOME`        | *(required)*                 | Path to the FITS install (must contain `lib/`). |
 | `FITS_SOCKET_PATH` | `/tmp/fits.sock`             | Filesystem path for the Unix socket.      |
-| `FITS_SOCKET_BACKLOG` | `64`                      | Kernel listen backlog for the `UNIXServer` (pre-accept cushion). |
-| `FITS_QUEUE_CAPACITY` | `64`                      | Max app-level queue depth; `accept`ed connections beyond this wait on the kernel backlog. |
+| `FITS_QUEUE_CAPACITY` | `64`                      | Max app-level queue depth; `accept`ed connections beyond this wait on the default kernel backlog. |
 | `FITS_LOG_LEVEL`   | `info`                       | Logging verbosity (`debug`/`info`/`warn`/`error`). |
 
 Boot validation: if `FITS_HOME` is missing or does not contain `lib/`, log a
@@ -100,6 +99,14 @@ clear message and exit non-zero — do not start.
 
 The `/tmp/fits.sock` default is for local development. In production the socket
 lives at `/run/fits/fits.sock` (see DEPLOYMENT.md), set via `FITS_SOCKET_PATH`.
+
+> **Deviation from original design:** an earlier draft included a
+> `FITS_SOCKET_BACKLOG` env var to tune the kernel listen backlog. This was
+> dropped in favor of the app-level `FITS_QUEUE_CAPACITY` plus the default
+> kernel backlog. Ruby's `UNIXServer.new(path)` exposes no backlog argument, so
+> a configurable kernel backlog was never implemented; the code binds with the
+> default kernel backlog and bounds concurrency at the application layer via
+> `FITS_QUEUE_CAPACITY`.
 
 ## Protocol & Data Flow
 
@@ -109,7 +116,7 @@ lives at `/run/fits/fits.sock` (see DEPLOYMENT.md), set via `FITS_SOCKET_PATH`.
 3. Builds `Metrics`, then `FitsExaminer` -> constructs the one warm `Fits`
    instance (slow, once), recording process start time for uptime.
 4. `SocketServer` unlinks any stale socket file, binds `UNIXServer` at
-   `FITS_SOCKET_PATH` with the configured backlog, starts the acceptor and
+   `FITS_SOCKET_PATH` (default kernel backlog), starts the acceptor and
    worker threads, logs "ready".
 
 ### Per request (acceptor thread + single serial worker)
