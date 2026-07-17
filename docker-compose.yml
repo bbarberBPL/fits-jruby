@@ -1,0 +1,32 @@
+services:
+  fits:
+    build: .
+    # Run as a configurable unprivileged UID/GID (no host `fits` account needed).
+    user: "${FITS_UID}:${FITS_GID}"
+    environment:
+      FITS_SOCKET_PATH: /run/fits/fits.sock
+      FITS_QUEUE_CAPACITY: "${FITS_QUEUE_CAPACITY}"
+      FITS_LOG_LEVEL: "${FITS_LOG_LEVEL}"
+      FITS_READ_TIMEOUT: "${FITS_READ_TIMEOUT}"
+      FITS_WRITE_TIMEOUT: "${FITS_WRITE_TIMEOUT}"
+      JAVA_OPTS: "-Xms256m -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+ExitOnOutOfMemoryError"
+    volumes:
+      # Socket directory shared with the host so host clients can connect.
+      - "${FITS_SOCKET_DIR}:/run/fits"
+      # Media to analyze: bind-mount host dirs READ-ONLY at the SAME path so a
+      # client-sent absolute path resolves identically inside the container.
+      # Add one line per host directory you want analyzable, e.g.:
+      # - /srv/media:/srv/media:ro
+      - "${PWD}/spec/fixtures:${PWD}/spec/fixtures:ro"
+    # Memory ceiling mirroring the systemd MemoryMax=1500M.
+    mem_limit: 1500m
+    # Hardening (parity with systemd ProtectSystem/NoNewPrivileges intent).
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    # No published ports: the server is reachable only over the Unix socket.

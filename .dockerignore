@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.superpowers
+docs
+tmp
+coverage
+*.sock
+fits.log
+.env
+*.key
+*.pem
+.bundle
+vendor
+spec/examples.txt

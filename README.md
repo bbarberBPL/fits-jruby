@@ -36,6 +36,93 @@ The server logs to stdout and listens on `/tmp/fits.sock` by default. Press
 The server validates `FITS_HOME` at boot and exits non-zero with a clear error
 message if it is missing or does not contain a `lib/` directory.
 
+## Run with Docker (local dev)
+
+A local-development container that simulates the production systemd deployment
+(dev/prod parity): it runs as an unprivileged user, serves over a Unix socket at
+`/run/fits/fits.sock`, applies the same memory ceiling and JVM options, and does
+not publish any network ports.
+
+### Prerequisites
+
+- Docker and Docker Compose.
+- `socat` or `nc` on the host for sending smoke requests to the socket.
+
+### Quick start
+
+Run these **from the repository root** (the media mount below uses `${PWD}`, so
+running from elsewhere binds the wrong directory):
+
+```bash
+cp .env.example .env
+# Dev: own the socket so your host processes can reach it.
+export FITS_UID=$(id -u) FITS_GID=$(id -g)
+# Create ./run BEFORE `up`. If Docker auto-creates it, it is owned by root and
+# the unprivileged container cannot create the socket inside it.
+mkdir -p ./run
+docker compose up --build
+```
+
+The socket appears on the host at `./run/fits.sock` (bind-mounted to
+`/run/fits/fits.sock` inside the container).
+
+### Sending requests over the socket
+
+```bash
+printf '/abs/path/to/file.tif\n' | socat - UNIX-CONNECT:./run/fits.sock
+printf 'STATS\n' | socat - UNIX-CONNECT:./run/fits.sock
+```
+
+> **First request is slow.** The very first examination after startup pays the
+> JVM + FITS toolbelt cold-start cost while the warm `Fits` instance is built.
+> Use a generous timeout on the first `examine`; subsequent requests are fast.
+
+### Media mounts (read-only path parity)
+
+FITS examines files by absolute path, and the client sends that same absolute
+path over the socket, so the path must resolve **identically inside the
+container**. To analyze host files, add a read-only bind mount at the same path
+under `volumes:` in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - "${FITS_SOCKET_DIR}:/run/fits"
+  - /your/media:/your/media:ro   # add one line per host directory to analyze
+```
+
+The compose file already mounts `spec/fixtures` read-only at its host path as an
+example.
+
+### UID/GID recipes
+
+- **Dev (default):** `export FITS_UID=$(id -u) FITS_GID=$(id -g)` so the socket
+  is owned by you. No host `fits` account or group is required.
+- **Prod rehearsal:** create a `fits` group (`sudo groupadd fits`), add your
+  client user to it, and set `FITS_GID` to that group's gid in `.env` to
+  exercise the production socket-ownership posture locally.
+
+### The `docker run` equivalent (non-compose)
+
+```bash
+docker build -t fits-jruby .
+mkdir -p ./run   # create first so the unprivileged container can write the socket
+docker run --rm \
+  -u "$(id -u):$(id -g)" \
+  -v "$PWD/run:/run/fits" \
+  -v /your/media:/your/media:ro \
+  -e FITS_QUEUE_CAPACITY=64 \
+  -e FITS_LOG_LEVEL=info \
+  -e FITS_READ_TIMEOUT=5 \
+  -e FITS_WRITE_TIMEOUT=30 \
+  --memory 1500m \
+  fits-jruby
+```
+
+The socket lands at `./run/fits.sock` on the host, just as with Compose.
+
+> The image is **local-only** — it is not published to any registry. Build it
+> yourself with `docker compose build` or `docker build`.
+
 ## Logging
 
 The server logs to stdout using Ruby's standard `Logger`. FITS's own internal

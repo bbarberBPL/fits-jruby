@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Idempotent FITS installer. Safe to run manually, in the Docker builder stage,
+# and from the container entrypoint. Uses only Ruby stdlib.
+$LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
+
+require 'fits_jruby/fits_installer'
+
+fits_home = ENV.fetch('FITS_HOME', nil)
+if fits_home.nil? || fits_home.empty?
+  warn 'setup error: FITS_HOME must be set (target install directory)'
+  exit 1
+end
+
+installer = FitsJruby::FitsInstaller.new(
+  fits_home: fits_home,
+  version: ENV.fetch('FITS_VERSION', FitsJruby::FitsInstaller::FITS_VERSION),
+  url: ENV.fetch('FITS_URL', nil),
+  sha256: ENV.fetch('FITS_SHA256', FitsJruby::FitsInstaller::EXPECTED_SHA256)
+)
+
+begin
+  result = installer.install!
+  puts(result == :present ? 'FITS already present.' : 'FITS installed.')
+  exit 0
+rescue FitsJruby::FitsInstaller::Error => e
+  warn "setup error: #{e.message}"
+  exit 1
+end
