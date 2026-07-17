@@ -38,6 +38,20 @@ RSpec.describe FitsJruby::RequestHandler do
     end
   end
 
+  it 'rejects a FIFO (not a regular file)' do
+    Dir.mktmpdir do |dir|
+      fifo = File.join(dir, 'pipe')
+      if File.respond_to?(:mkfifo)
+        File.mkfifo(fifo)
+      else
+        system('mkfifo', fifo)
+      end
+
+      expect(examiner).not_to receive(:examine)
+      expect(handler.handle("#{fifo}\n")).to match(/\AERROR: not a regular file: /)
+    end
+  end
+
   it 'delegates a valid path to the examiner and returns its XML' do
     Tempfile.create(['sample', '.tif']) do |file|
       allow(examiner).to receive(:examine).with(file.path).and_return('<?xml version="1.0"?><fits/>')
