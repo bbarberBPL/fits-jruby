@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Container entrypoint: idempotent FITS check, then hand off to the server.
+set -euo pipefail
+
+# 1. Idempotent FITS install/verify. No-op when FITS is already baked in.
+#    Fails loudly (non-zero) if FITS is missing and cannot be fetched.
+ruby bin/setup
+
+# 2. Ensure the socket directory exists (normally provided by a bind mount).
+socket_dir="$(dirname "${FITS_SOCKET_PATH:-/run/fits/fits.sock}")"
+mkdir -p "$socket_dir" 2>/dev/null || true
+
+# 3. Hand off to the server so it becomes the signal-receiving process.
+#    exec is required so SIGTERM/SIGINT reach JRuby for graceful shutdown.
+exec bin/fits-server
