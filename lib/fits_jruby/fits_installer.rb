@@ -14,9 +14,13 @@ module FitsJruby
     class Error < StandardError; end
 
     FITS_VERSION = '1.6.0'
-    # NOTE: EXPECTED_SHA256 is a placeholder in this task; the real value is
-    # pinned later (Task 4) per the plan's SHA-256 Pinning Protocol.
-    EXPECTED_SHA256 = 'REPLACE_WITH_REAL_SHA256'
+    # Real SHA-256 of the FITS 1.6.0 release zip, pinned per the SHA-256 Pinning
+    # Protocol (verified against the download at build time by bin/setup).
+    EXPECTED_SHA256 = '32e436effe7251c5b067ec3f02321d5baf4944b3f0d1010fb8ec42039d9e3b73'
+
+    # Cap on HTTP redirects the default downloader will follow, guarding against
+    # an infinite redirect loop (which would otherwise recurse until SystemStackError).
+    MAX_REDIRECTS = 5
 
     def self.default_url(version)
       "https://github.com/harvard-lts/fits/releases/download/#{version}/fits-#{version}.zip"
@@ -28,19 +32,25 @@ module FitsJruby
       end
     end
 
-    def self.fetch_to_file(url, dest)
+    def self.fetch_to_file(url, dest, redirects_left = MAX_REDIRECTS)
       uri = URI(url)
       Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
         http.request(Net::HTTP::Get.new(uri)) do |response|
-          case response
-          when Net::HTTPRedirection
-            return fetch_to_file(response['location'], dest)
-          when Net::HTTPSuccess
-            File.open(dest, 'wb') { |f| response.read_body { |chunk| f.write(chunk) } }
-          else
-            raise Error, "download failed: HTTP #{response.code} for #{url}"
-          end
+          return handle_response(response, url, dest, redirects_left)
         end
+      end
+    end
+
+    def self.handle_response(response, url, dest, redirects_left)
+      case response
+      when Net::HTTPRedirection
+        raise Error, "too many redirects (>#{MAX_REDIRECTS}) fetching FITS" if redirects_left <= 0
+
+        fetch_to_file(response['location'], dest, redirects_left - 1)
+      when Net::HTTPSuccess
+        File.open(dest, 'wb') { |f| response.read_body { |chunk| f.write(chunk) } }
+      else
+        raise Error, "download failed: HTTP #{response.code} for #{url}"
       end
     end
 
@@ -110,6 +120,9 @@ module FitsJruby
 
     def install_atomically(root)
       FileUtils.mkdir_p(File.dirname(@fits_home))
+      # Across filesystems FileUtils.mv degrades to copy+delete (not an atomic
+      # rename), but that is fine here: only a pre-validated FITS root (verified
+      # to contain lib/) is ever moved into place.
       FileUtils.mv(root, @fits_home)
     end
   end
