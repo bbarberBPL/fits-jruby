@@ -2,6 +2,11 @@
 # Container entrypoint: idempotent FITS check, then hand off to the server.
 set -euo pipefail
 
+# Mirror the systemd unit's UMask=0117 so UNIXServer.new creates the socket at
+# 0660 (group-connectable, world-denied). Without this, Docker's default umask
+# 022 yields a 0755 socket and group members cannot connect (connect needs w).
+umask 0117
+
 # 1. Idempotent FITS install/verify. No-op when FITS is already baked in.
 #    Fails loudly (non-zero) if FITS is missing and cannot be fetched.
 ruby bin/setup

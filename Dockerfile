@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -yqq --no-install-recommends \
       libdigest-md5-file-perl libdigest-perl-md5-perl libdigest-sha-perl \
       libposix-strptime-perl libunicode-linebreak-perl \
       libmms0 libcurl3-gnutls \
-      unzip ca-certificates \
+      curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install JRuby 9.4.15.0 (SHA-256 verified) to /opt/jruby.

@@ -8,3 +8,8 @@ coverage
 *.sock
 fits.log
 .env
+*.key
+*.pem
+.bundle
+vendor
+spec/examples.txt
