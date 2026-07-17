@@ -105,6 +105,7 @@ example.
 
 ```bash
 docker build -t fits-jruby .
+mkdir -p ./run   # create first so the unprivileged container can write the socket
 docker run --rm \
   -u "$(id -u):$(id -g)" \
   -v "$PWD/run:/run/fits" \
