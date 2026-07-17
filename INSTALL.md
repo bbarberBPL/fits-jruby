@@ -73,19 +73,19 @@ ruby --version
 
 ---
 
-## Step 3 — Obtain and unzip FITS 1.6.0
+## Step 3 — Obtain FITS 1.6.0 with `bin/setup`
 
-FITS is distributed as a zip archive. Download and unzip it to a convenient
-location (this guide uses `~/tools`):
+The recommended way to acquire FITS is the idempotent `bin/setup` installer. It
+downloads the FITS zip, verifies its SHA-256 checksum, and unzips it to
+`FITS_HOME` if it is not already present — and is a no-op when FITS is already
+installed there. It requires `unzip` to be available:
 
 ```bash
-mkdir -p ~/tools
-cd ~/tools
-curl -L -O https://github.com/harvard-lts/fits/releases/download/1.6.0/fits-1.6.0.zip
-unzip fits-1.6.0.zip -d fits-1.6.0
+sudo apt install -y unzip
+FITS_HOME=~/tools/fits-1.6.0 ruby bin/setup
 ```
 
-After unzipping you should see a `lib/` directory inside `fits-1.6.0`:
+After it runs you should see a `lib/` directory inside `fits-1.6.0`:
 
 ```bash
 ls ~/tools/fits-1.6.0/lib/
@@ -93,6 +93,42 @@ ls ~/tools/fits-1.6.0/lib/
 ```
 
 If `lib/` is missing the server will refuse to start.
+
+> **Manual fallback.** If you prefer to install FITS by hand, download and unzip
+> the release archive yourself:
+>
+> ```bash
+> mkdir -p ~/tools && cd ~/tools
+> curl -L -O https://github.com/harvard-lts/fits/releases/download/1.6.0/fits-1.6.0.zip
+> unzip fits-1.6.0.zip -d fits-1.6.0
+> ```
+
+### FITS tool OS dependencies
+
+FITS bundles a toolbelt (ExifTool, jpylyzer, MediaInfo, `file`, and others) that
+relies on OS-level packages. In the Docker image these are installed
+automatically; on a host or systemd install you must install them yourself.
+On Ubuntu 22.04:
+
+```bash
+sudo apt install -y \
+  python3 python-is-python3 \
+  libarchive-zip-perl libio-compress-perl libcompress-raw-zlib-perl \
+  libcompress-bzip2-perl libcompress-raw-bzip2-perl libio-digest-perl \
+  libdigest-md5-file-perl libdigest-perl-md5-perl libdigest-sha-perl \
+  libposix-strptime-perl libunicode-linebreak-perl \
+  libmms0 libcurl3-gnutls
+```
+
+| Package(s) | Needed by |
+|------------|-----------|
+| `python3`, `python-is-python3` | jpylyzer (JPEG 2000 validation) |
+| The `lib*-perl` packages above | ExifTool's Perl runtime and its compression/digest modules |
+| `libmms0`, `libcurl3-gnutls` | MediaInfo shared libraries |
+
+FITS also shells out to the `file` command, which **must be present** on the
+host. Ubuntu ships `file` in its base install; FITS 1.6.0 was tested against
+`file` 5.43. (The Docker image builds `file` 5.43 from source to match.)
 
 ---
 
