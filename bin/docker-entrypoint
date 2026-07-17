@@ -2,19 +2,23 @@
 # Container entrypoint: idempotent FITS check, then hand off to the server.
 set -euo pipefail
 
-# Mirror the systemd unit's UMask=0117 so UNIXServer.new creates the socket at
-# 0660 (group-connectable, world-denied). Without this, Docker's default umask
-# 022 yields a 0755 socket and group members cannot connect (connect needs w).
-umask 0117
-
 # 1. Idempotent FITS install/verify. No-op when FITS is already baked in.
 #    Fails loudly (non-zero) if FITS is missing and cannot be fetched.
+#    Runs under the default umask so extracted FITS dirs/binaries keep +x.
 ruby bin/setup
 
 # 2. Ensure the socket directory exists (normally provided by a bind mount).
+#    Runs under the default umask so the directory keeps its execute/search
+#    bit — a dir without +x cannot hold the socket.
 socket_dir="$(dirname "${FITS_SOCKET_PATH:-/run/fits/fits.sock}")"
 mkdir -p "$socket_dir" 2>/dev/null || true
 
-# 3. Hand off to the server so it becomes the signal-receiving process.
+# 3. Restrict the umask so UNIXServer.new creates the socket at 0660
+#    (group-connectable, world-denied), matching the systemd unit's UMask=0117.
+#    Set here — after setup and mkdir — so only the socket is affected, not the
+#    FITS extraction or the directory creation above.
+umask 0117
+
+# 4. Hand off to the server so it becomes the signal-receiving process.
 #    exec is required so SIGTERM/SIGINT reach JRuby for graceful shutdown.
 exec bin/fits-server
