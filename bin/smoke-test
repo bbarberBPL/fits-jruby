@@ -10,7 +10,9 @@ require 'json'
 require 'tmpdir'
 
 FIXTURE = File.expand_path('../spec/fixtures/sample.tif', __dir__)
+SERVER = File.expand_path('fits-server', __dir__)
 SOCKET_TRIES = 120 # x 0.25s ~= 30s for JVM + FITS cold-start
+READ_TIMEOUT = 60 # seconds; generous for a cold-start examine, but bounds a wedged server
 
 @failed = false
 
@@ -37,8 +39,27 @@ end
 def request(socket, line)
   UNIXSocket.open(socket) do |sock|
     sock.write("#{line}\n")
-    sock.read
+    read_until_eof(sock, READ_TIMEOUT)
   end
+end
+
+# Reads chunks until EOF, bounded by a deadline so a wedged server (one that
+# accepts but never responds or closes) cannot hang the smoke test forever.
+def read_until_eof(sock, timeout)
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+  buf = +''
+  loop do
+    remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise "read timed out after #{timeout}s" if remaining <= 0
+    raise "read timed out after #{timeout}s" unless sock.wait_readable(remaining)
+
+    chunk = sock.read_nonblock(65_536, exception: false)
+    next if chunk == :wait_readable
+    break if chunk.nil? # EOF
+
+    buf << chunk
+  end
+  buf
 end
 
 # Runs a check block that returns [ok, expected, actual]. Prints ✓/✗ and
@@ -115,7 +136,7 @@ Dir.mktmpdir('fits-smoke') do |dir|
   socket = File.join(dir, 'smoke.sock')
   pid = spawn(
     { 'FITS_HOME' => home, 'FITS_SOCKET_PATH' => socket, 'JRUBY_OPTS' => '-J-Xmx512m' },
-    'bin/fits-server'
+    SERVER
   )
 
   begin
