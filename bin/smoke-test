@@ -6,6 +6,7 @@
 # behavior, tears down, and exits non-zero on any failure. Skips (exit 0)
 # when FITS is not installed. Talks to the server only over the socket.
 require 'socket'
+require 'io/wait' # IO#wait_readable, used by the bounded socket read
 require 'json'
 require 'tmpdir'
 
