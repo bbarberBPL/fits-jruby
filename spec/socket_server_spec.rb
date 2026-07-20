@@ -119,12 +119,30 @@ RSpec.describe FitsJruby::SocketServer do
   #
   # A connection that was enqueued before shutdown but is still sitting in the
   # queue when the worker exits (e.g. the worker had to be killed mid-serve)
-  # must be closed by stop, so its client fails fast on a closed socket rather
-  # than hanging until its own timeout.
-  it 'closes connections left in the queue at stop instead of leaking them' do
-    server, = build_server(FakeExaminer.new)
+  # must be closed by drain_pending_connections, so its client fails fast on a
+  # closed socket rather than hanging until its own timeout.
+  #
+  # Determinism: we occupy the worker with an in-flight examine that blocks on a
+  # latch, so the connection we enqueue afterward is GUARANTEED to still be in
+  # the queue (the busy worker cannot pop it). We then invoke the drain directly
+  # and prove IT — not the worker — is what closed the leftover.
+  it 'drains and closes connections left in the queue instead of leaking them' do
+    latch_start = Queue.new
+    latch_resume = Queue.new
+    slow = Object.new
+    slow.define_singleton_method(:examine) do |_path|
+      latch_start.push(:ready)
+      latch_resume.pop
+      '<?xml version="1.0"?><fits/>'
+    end
+
+    server, = build_server(slow)
     server.start
     wait_for_socket
+
+    # Occupy the single worker with an in-flight, blocked examine.
+    Thread.new { Tempfile.create(['a', '.tif']) { |f| request(f.path) } }
+    latch_start.pop
 
     queue = server.instance_variable_get(:@queue)
     closed = false
@@ -133,12 +151,19 @@ RSpec.describe FitsJruby::SocketServer do
     leftover.define_singleton_method(:close) { closed = true }
     queue.push(leftover)
 
-    server.stop
+    # The worker is busy, so the leftover is still queued — not yet closed.
+    expect(closed).to be(false)
 
+    # The drain (not the worker) closes it.
+    server.send(:drain_pending_connections)
     expect(closed).to be(true)
+
+    latch_resume.push(:go) # release the in-flight serve so stop can finish
+  ensure
+    server&.stop
   end
 
-  it 'completes stop promptly even with a connection queued behind an in-flight serve' do
+  it 'completes stop promptly and closes a connection queued behind an in-flight serve' do
     latch_start = Queue.new
     latch_resume = Queue.new
     slow = Object.new
@@ -169,14 +194,17 @@ RSpec.describe FitsJruby::SocketServer do
 
     expect(elapsed).to be < 6 # no indefinite hang; well under worker kill(5s)
 
-    # The queued client sees a closed socket (EOF/reset), not an indefinite hang.
-    begin
+    # The queued client must be closed promptly (served-then-closed or drained),
+    # NOT left hanging. Prove it with a bounded read that must return, never
+    # block indefinitely.
+    read_result = Thread.new do
       queued.read
     rescue Errno::ECONNRESET, IOError
-      nil
-    ensure
-      queued.close rescue nil # rubocop:disable Style/RescueModifier
-    end
+      :closed
+    end.join(5)
+    expect(read_result).not_to be_nil # the read returned; no indefinite hang
+  ensure
+    queued&.close rescue nil # rubocop:disable Style/RescueModifier
   end
 
   # ── Fix B: socket mode enforced at 0660 regardless of umask ────────────────
@@ -220,6 +248,72 @@ RSpec.describe FitsJruby::SocketServer do
 
     # And the server still answers a request.
     expect(request('STATS')).to start_with('{')
+  ensure
+    server&.stop
+  end
+
+  # ── Fix 1: @running is atomic so stop never respawns during shutdown ───────
+  #
+  # The worker KILL-fallback path (drain_worker's join(5) timeout → @worker.kill)
+  # runs the worker_loop ensure, which reads @running. With a plain non-volatile
+  # boolean there is no happens-before edge between stop's write and that
+  # killed-thread read, so the JVM could observe a stale `true` and respawn a
+  # worker during shutdown — leaking a thread blocked on @queue.pop. The atomic
+  # gives the memory barrier. Forcing the real 5s kill path in a unit test would
+  # need a 5s+ block, so we assert the invariant directly: stop clears the
+  # atomic before draining, and the respawn guard reads it and refuses.
+  it 'uses an atomic for @running so the respawn guard reliably sees shutdown' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    running = server.instance_variable_get(:@running)
+    expect(running).to be_a(java.util.concurrent.atomic.AtomicBoolean)
+    expect(running.get).to be(true)
+
+    server.stop
+
+    # stop cleared the atomic (memory-barrier publish observed by any thread).
+    expect(running.get).to be(false)
+    # The worker is not alive and was not respawned during shutdown.
+    expect(server.instance_variable_get(:@worker).alive?).to be(false)
+  end
+
+  it 'does not respawn a worker when the guard runs after stop (kill-path invariant)' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+    server.stop
+
+    worker_before = server.instance_variable_get(:@worker)
+    # Directly invoke the guard exactly as a killed worker's ensure would; with
+    # @running already false it must be a no-op — no new thread, no log spam.
+    expect { server.send(:respawn_worker_if_crashed) }.not_to raise_error
+    expect(server.instance_variable_get(:@worker)).to equal(worker_before)
+    expect(worker_before.alive?).to be(false)
+  end
+
+  # ── Fix 2: respawn backoff + cap prevents thrash on persistent failure ─────
+
+  it 'stops respawning after repeated rapid crashes and logs a single fatal' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    logger = server.instance_variable_get(:@logger)
+    fatal_messages = []
+    logger.define_singleton_method(:fatal) { |msg| fatal_messages << msg }
+
+    # Simulate the cap already being reached; the next guard call must give up.
+    server.instance_variable_set(:@respawn_count,
+                                 FitsJruby::SocketServer::MAX_CONSECUTIVE_RESPAWNS)
+    worker_before = server.instance_variable_get(:@worker)
+
+    server.send(:respawn_worker_if_crashed)
+
+    expect(server.instance_variable_get(:@worker)).to equal(worker_before)
+    expect(fatal_messages.size).to eq(1)
+    expect(fatal_messages.first).to match(/repeatedly crashed/)
   ensure
     server&.stop
   end

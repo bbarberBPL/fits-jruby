@@ -13,6 +13,15 @@ module FitsJruby
     # Sentinel pushed onto the queue to signal the worker to shut down.
     SHUTDOWN = Object.new.freeze
 
+    # Self-heal policy: cap consecutive rapid respawns so a worker that dies
+    # immediately and repeatedly (sustained OOM, repeated fatal error) cannot
+    # thrash the JVM with unbounded thread churn + a log flood.
+    MAX_CONSECUTIVE_RESPAWNS = 5
+    # A worker that has run healthily for at least this long (measured from its
+    # last respawn) is considered recovered, so the consecutive-respawn counter
+    # resets and a fresh transient crash still self-heals.
+    RESPAWN_RESET_INTERVAL = 60 # seconds
+
     def initialize(config:, handler:, metrics:, logger: nil)
       @config = config
       @handler = handler
@@ -20,9 +29,15 @@ module FitsJruby
       @logger = logger || default_logger(config.log_level)
       @queue = SizedQueue.new(config.queue_capacity)
       @reader = ConnectionReader.new
-      @running = false
+      # Atomic so the flag written by stop is reliably observed by a worker's
+      # ensure block even when the worker was terminated via Thread#kill (no
+      # ordinary happens-before edge exists on that path). Prevents a respawn
+      # from racing shutdown and leaking a thread blocked on @queue.pop.
+      @running = java.util.concurrent.atomic.AtomicBoolean.new(false)
       @stopped = false
       @stop_mutex = Mutex.new
+      @respawn_count = 0
+      @last_respawn_at = nil
     end
 
     def socket_path
@@ -37,7 +52,7 @@ module FitsJruby
       # ownership comes from the process's gid; we deliberately do not chown
       # (uid/gid mapping is deployment-specific).
       File.chmod(0o660, socket_path)
-      @running = true
+      @running.set(true)
       @stopped = false
       @worker = Thread.new { worker_loop }
       @acceptor = Thread.new { acceptor_loop }
@@ -53,7 +68,7 @@ module FitsJruby
         @stopped = true
       end
 
-      @running = false
+      @running.set(false)
       # Order matters: stop ACCEPTING first, then drain the worker. Closing the
       # listening socket makes the acceptor's blocked accept raise IOError/EBADF
       # so it breaks; joining it guarantees no new connection can be enqueued
@@ -101,7 +116,7 @@ module FitsJruby
     end
 
     def acceptor_loop
-      while @running
+      while @running.get
         begin
           connection = @server.accept
           @metrics.enqueue
@@ -140,11 +155,34 @@ module FitsJruby
     # this is a no-op. Any other exit while @running is still true means the
     # worker died unexpectedly (e.g. @queue.pop or the sentinel check raised) —
     # the single worker is a SPOF (STATS is served by it too), so self-heal by
-    # respawning. The @running guard prevents a respawn loop after stop.
+    # respawning. The atomic @running guard prevents a respawn loop after stop:
+    # stop's @running.set(false) publishes a memory barrier the killed worker's
+    # ensure reliably observes, so no worker is respawned during shutdown.
+    #
+    # Backoff + cap: if the worker keeps dying immediately (sustained OOM,
+    # repeated fatal error) we would otherwise churn threads and flood the log.
+    # We sleep a small increasing backoff before each respawn and, after
+    # MAX_CONSECUTIVE_RESPAWNS rapid respawns, give up (log once, stay
+    # degraded-but-not-thrashing). A worker that survives RESPAWN_RESET_INTERVAL
+    # is treated as recovered and resets the counter, so a later transient crash
+    # self-heals again.
     def respawn_worker_if_crashed
-      return unless @running
+      return unless @running.get
 
-      @logger.error('worker loop exited unexpectedly while running; respawning')
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @respawn_count = 0 if @last_respawn_at && (now - @last_respawn_at) > RESPAWN_RESET_INTERVAL
+
+      if @respawn_count >= MAX_CONSECUTIVE_RESPAWNS
+        @logger.fatal("worker repeatedly crashed (#{@respawn_count} times); giving up respawning")
+        return
+      end
+
+      @respawn_count += 1
+      sleep [0.1 * @respawn_count, 5].min
+      return unless @running.get # stop may have fired during the backoff sleep
+
+      @last_respawn_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @logger.error("worker loop exited unexpectedly while running; respawning (attempt #{@respawn_count})")
       @worker = Thread.new { worker_loop }
     end
 
