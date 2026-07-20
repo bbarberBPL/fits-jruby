@@ -32,6 +32,11 @@ module FitsJruby
     def start
       remove_stale_socket
       @server = UNIXServer.new(socket_path)
+      # Enforce 0660 in code rather than relying on the ambient umask, so a
+      # permissive umask cannot yield a world-connectable socket. Group
+      # ownership comes from the process's gid; we deliberately do not chown
+      # (uid/gid mapping is deployment-specific).
+      File.chmod(0o660, socket_path)
       @running = true
       @stopped = false
       @worker = Thread.new { worker_loop }
@@ -49,10 +54,16 @@ module FitsJruby
       end
 
       @running = false
-      drain_worker         # push sentinel so worker exits after current serve
+      # Order matters: stop ACCEPTING first, then drain the worker. Closing the
+      # listening socket makes the acceptor's blocked accept raise IOError/EBADF
+      # so it breaks; joining it guarantees no new connection can be enqueued
+      # after the SHUTDOWN sentinel (which would otherwise be popped-past and
+      # leak, hanging its client).
       close_server_socket  # unblocks the acceptor (closed socket raises IOError)
+      join_acceptor        # guaranteed to exit now the listening socket is gone
+      drain_worker         # push sentinel so worker exits after current serve
+      drain_pending_connections # close anything left in the queue (fail fast)
       remove_stale_socket
-      join_acceptor
       @logger.info('stopped')
     end
 
@@ -70,6 +81,18 @@ module FitsJruby
 
       @logger.warn('worker did not stop in 5s; killing')
       @worker.kill
+    end
+
+    # After the worker has exited, close any connections still queued (enqueued
+    # before shutdown but never served). Without this their clients would hang
+    # until their own timeout; closing gives them a fast-failing closed socket.
+    def drain_pending_connections
+      loop do
+        conn = @queue.pop(true)
+        safe_close(conn) unless conn.equal?(SHUTDOWN)
+      end
+    rescue ThreadError
+      # queue empty
     end
 
     def join_acceptor
@@ -110,7 +133,19 @@ module FitsJruby
         end
       end
     ensure
-      @logger.error('worker loop exited unexpectedly while running') if @running
+      respawn_worker_if_crashed
+    end
+
+    # A clean shutdown pops the SHUTDOWN sentinel with @running already false, so
+    # this is a no-op. Any other exit while @running is still true means the
+    # worker died unexpectedly (e.g. @queue.pop or the sentinel check raised) —
+    # the single worker is a SPOF (STATS is served by it too), so self-heal by
+    # respawning. The @running guard prevents a respawn loop after stop.
+    def respawn_worker_if_crashed
+      return unless @running
+
+      @logger.error('worker loop exited unexpectedly while running; respawning')
+      @worker = Thread.new { worker_loop }
     end
 
     def safe_close(connection)

@@ -115,6 +115,115 @@ RSpec.describe FitsJruby::SocketServer do
     expect { UNIXSocket.new(@socket_path) }.to raise_error(Errno::ENOENT, /No such file/)
   end
 
+  # ── Fix A: shutdown race — queued connections are closed, never leaked ─────
+  #
+  # A connection that was enqueued before shutdown but is still sitting in the
+  # queue when the worker exits (e.g. the worker had to be killed mid-serve)
+  # must be closed by stop, so its client fails fast on a closed socket rather
+  # than hanging until its own timeout.
+  it 'closes connections left in the queue at stop instead of leaking them' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    queue = server.instance_variable_get(:@queue)
+    closed = false
+    leftover = Object.new
+    leftover.define_singleton_method(:closed?) { false }
+    leftover.define_singleton_method(:close) { closed = true }
+    queue.push(leftover)
+
+    server.stop
+
+    expect(closed).to be(true)
+  end
+
+  it 'completes stop promptly even with a connection queued behind an in-flight serve' do
+    latch_start = Queue.new
+    latch_resume = Queue.new
+    slow = Object.new
+    slow.define_singleton_method(:examine) do |_path|
+      latch_start.push(:ready)
+      latch_resume.pop
+      '<?xml version="1.0"?><fits/>'
+    end
+
+    server, = build_server(slow)
+    server.start
+    wait_for_socket
+
+    # Occupy the worker.
+    Thread.new do
+      Tempfile.create(['a', '.tif']) { |f| request(f.path) }
+    end
+    latch_start.pop
+
+    # Enqueue a second connection that will sit in the queue during shutdown.
+    queued = UNIXSocket.new(@socket_path)
+
+    # Let the in-flight serve finish, then stop.
+    latch_resume.push(:go)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    server.stop
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    expect(elapsed).to be < 6 # no indefinite hang; well under worker kill(5s)
+
+    # The queued client sees a closed socket (EOF/reset), not an indefinite hang.
+    begin
+      queued.read
+    rescue Errno::ECONNRESET, IOError
+      nil
+    ensure
+      queued.close rescue nil # rubocop:disable Style/RescueModifier
+    end
+  end
+
+  # ── Fix B: socket mode enforced at 0660 regardless of umask ────────────────
+
+  it 'creates the socket with mode 0660 regardless of the ambient umask' do
+    server, = build_server(FakeExaminer.new)
+    old_umask = File.umask(0o000) # permissive umask would yield 0777 without chmod
+    begin
+      server.start
+      wait_for_socket
+      expect(File.stat(@socket_path).mode & 0o777).to eq(0o660)
+    ensure
+      File.umask(old_umask)
+      server.stop
+    end
+  end
+
+  # ── Fix C: worker self-heals if it dies unexpectedly while running ─────────
+
+  it 'respawns the worker if it dies unexpectedly and keeps serving' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    original = server.instance_variable_get(:@worker)
+    # Simulate an unexpected worker death while @running is true. Thread#kill
+    # runs the worker_loop ensure block, which respawns because @running.
+    original.kill
+    original.join
+
+    # Give the respawn a moment.
+    20.times do
+      break if server.instance_variable_get(:@worker) != original
+
+      sleep 0.05
+    end
+
+    current = server.instance_variable_get(:@worker)
+    expect(current).not_to equal(original)
+    expect(current.alive?).to be(true)
+
+    # And the server still answers a request.
+    expect(request('STATS')).to start_with('{')
+  ensure
+    server&.stop
+  end
+
   # ── Fix C1: read timeout — stalled client does not wedge the worker ──────
 
   it 'responds with ERROR: read timeout when client connects but never sends a newline' do
