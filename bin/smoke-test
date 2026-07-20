@@ -1,0 +1,161 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# End-to-end smoke test for the standalone FITS socket server.
+# Boots bin/fits-server on a temp socket, verifies examine/STATS/error
+# behavior, tears down, and exits non-zero on any failure. Skips (exit 0)
+# when FITS is not installed. Talks to the server only over the socket.
+require 'socket'
+require 'io/wait' # IO#wait_readable, used by the bounded socket read
+require 'json'
+require 'tmpdir'
+
+FIXTURE = File.expand_path('../spec/fixtures/sample.tif', __dir__)
+SERVER = File.expand_path('fits-server', __dir__)
+SOCKET_TRIES = 120 # x 0.25s ~= 30s for JVM + FITS cold-start
+READ_TIMEOUT = 60 # seconds; generous for a cold-start examine, but bounds a wedged server
+
+@failed = false
+
+def fits_home
+  ENV['FITS_HOME'] && !ENV['FITS_HOME'].empty? ? ENV['FITS_HOME'] : File.expand_path('~/tools/fits-1.6.0')
+end
+
+def valid_fits?(path)
+  Dir.exist?(File.join(path, 'lib'))
+end
+
+# Returns true once the socket is listening, false after exhausting tries.
+# rubocop:disable Naming/PredicateMethod -- an action, not a query; a `?` name would mislead
+def wait_for_socket(path, tries)
+  tries.times do
+    return true if File.socket?(path)
+
+    sleep 0.25
+  end
+  false
+end
+# rubocop:enable Naming/PredicateMethod
+
+def request(socket, line)
+  UNIXSocket.open(socket) do |sock|
+    sock.write("#{line}\n")
+    read_until_eof(sock, READ_TIMEOUT)
+  end
+end
+
+# Reads chunks until EOF, bounded by a deadline so a wedged server (one that
+# accepts but never responds or closes) cannot hang the smoke test forever.
+def read_until_eof(sock, timeout)
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+  buf = +''
+  loop do
+    remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise "read timed out after #{timeout}s" if remaining <= 0
+    raise "read timed out after #{timeout}s" unless sock.wait_readable(remaining)
+
+    chunk = sock.read_nonblock(65_536, exception: false)
+    next if chunk == :wait_readable
+    break if chunk.nil? # EOF
+
+    buf << chunk
+  end
+  buf
+end
+
+# Runs a check block that returns [ok, expected, actual]. Prints ✓/✗ and
+# records failure. Rescues so one failing check cannot abort the run.
+def check(description)
+  ok, expected, actual = yield
+  if ok
+    puts "✓ #{description}"
+  else
+    @failed = true
+    puts "✗ #{description}"
+    puts "    expected: #{expected}"
+    puts "    actual:   #{actual}"
+  end
+rescue StandardError => e
+  @failed = true
+  puts "✗ #{description}"
+  puts "    error: #{e.class}: #{e.message}"
+end
+
+def check_examine(socket)
+  check('examine returns FITS XML (image/tiff)') do
+    xml = request(socket, FIXTURE)
+    xml = request(socket, FIXTURE) if xml.to_s.empty? # one retry for cold-start race
+    ok = xml.start_with?('<?xml') && xml.include?('image/tiff')
+    [ok, 'starts with <?xml and includes image/tiff', xml.to_s[0, 80]]
+  end
+end
+
+def check_stats(socket)
+  check('STATS returns JSON with expected keys') do
+    body = request(socket, 'STATS')
+    snap = JSON.parse(body)
+    keys = %w[requests_total heap_used_bytes queue_depth]
+    [keys.all? { |k| snap.key?(k) }, "JSON with keys #{keys.join(', ')}", body[0, 120]]
+  end
+end
+
+def check_bad_path(socket)
+  check('bad path is rejected with ERROR (not XML)') do
+    resp = request(socket, 'not/absolute.tif')
+    ok = resp.start_with?('ERROR:') && !resp.start_with?('<?xml')
+    [ok, 'starts with ERROR:', resp.to_s[0, 80]]
+  end
+end
+
+# Runs the three socket-level checks against a booted server.
+def run_checks(socket)
+  check_examine(socket)
+  check_stats(socket)
+  check_bad_path(socket)
+end
+
+# Terminates the server and reaps it, tolerating an already-dead process.
+def teardown(pid)
+  Process.kill('TERM', pid)
+rescue Errno::ESRCH
+  nil
+ensure
+  begin
+    Process.wait(pid)
+  rescue Errno::ECHILD, Errno::ESRCH
+    nil
+  end
+end
+
+home = fits_home
+unless valid_fits?(home)
+  puts 'SKIP: FITS not found (set FITS_HOME)'
+  exit 0
+end
+
+Dir.mktmpdir('fits-smoke') do |dir|
+  socket = File.join(dir, 'smoke.sock')
+  pid = spawn(
+    { 'FITS_HOME' => home, 'FITS_SOCKET_PATH' => socket, 'JRUBY_OPTS' => '-J-Xmx512m' },
+    SERVER
+  )
+
+  begin
+    if wait_for_socket(socket, SOCKET_TRIES)
+      run_checks(socket)
+    else
+      @failed = true
+      puts "✗ server did not start within #{(SOCKET_TRIES * 0.25).round}s"
+    end
+  ensure
+    teardown(pid)
+  end
+end
+
+if @failed
+  puts 'SMOKE TEST FAILED'
+  exit 1
+else
+  puts 'SMOKE TEST PASSED'
+  exit 0
+end

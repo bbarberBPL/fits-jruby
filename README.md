@@ -235,5 +235,17 @@ bundle exec rspec
 FITS_HOME=~/tools/fits-1.6.0 bundle exec rspec --tag integration
 ```
 
+### Smoke test
+
+Quick end-to-end confidence check against the standalone server — boots it,
+examines a fixture, checks `STATS`, and verifies a bad request is rejected:
+
+```bash
+rake smoke          # or: ./bin/smoke-test
+```
+
+It skips cleanly (exit 0) when FITS is not installed. Set `FITS_HOME` if your
+FITS install is not at `~/tools/fits-1.6.0`.
+
 See [INSTALL.md](INSTALL.md) for setup instructions and
 [DEPLOYMENT.md](DEPLOYMENT.md) for the production systemd guide.

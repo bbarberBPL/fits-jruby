@@ -32,4 +32,9 @@ task :fixtures do
      "-pix_fmt yuv420p #{dir}/sample.mov"
 end
 
+desc 'End-to-end smoke test against the standalone server (skips if FITS absent)'
+task :smoke do
+  sh './bin/smoke-test'
+end
+
 task default: %i[spec lint]
