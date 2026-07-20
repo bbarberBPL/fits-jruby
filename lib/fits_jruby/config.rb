@@ -40,12 +40,19 @@ module FitsJruby
       @env.fetch('FITS_LOG_LEVEL', DEFAULT_LOG_LEVEL.to_s).downcase.to_sym
     end
 
+    # Optional path-confinement allowlist. A colon-separated list of absolute
+    # directory paths (like PATH). Empty/unset means no confinement (default).
+    def allowed_roots
+      @env.fetch('FITS_ALLOWED_ROOTS', '').split(File::PATH_SEPARATOR).reject(&:empty?)
+    end
+
     def validate!
       validate_fits_home!
       validate_log_level!
       validate_positive!(queue_capacity, 'queue capacity')
       validate_positive!(read_timeout, 'read timeout')
       validate_positive!(write_timeout, 'write timeout')
+      validate_allowed_roots!
       self
     end
 
@@ -75,6 +82,15 @@ module FitsJruby
       return if VALID_LOG_LEVELS.include?(log_level)
 
       raise Error, "invalid log level: #{log_level} (expected one of #{VALID_LOG_LEVELS.join(', ')})"
+    end
+
+    # Fail fast on a misconfigured allowlist: a typo'd root that silently allows
+    # nothing (or everything) is a security footgun.
+    def validate_allowed_roots!
+      allowed_roots.each do |root|
+        raise Error, "allowed root must be absolute: #{root}" unless root.start_with?('/')
+        raise Error, "allowed root must be a directory: #{root}" unless Dir.exist?(root)
+      end
     end
   end
 end
