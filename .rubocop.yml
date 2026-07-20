@@ -15,7 +15,10 @@ Metrics/BlockLength:
     - "Rakefile"
 
 Metrics/ClassLength:
-  Max: 175
+  # SocketServer coordinates the socket lifecycle, acceptor/worker threads,
+  # graceful drain, and bounded writes. The line protocol was extracted to
+  # ConnectionReader; the remainder is cohesive. 160 reflects the actual size.
+  Max: 160
 
 Metrics/MethodLength:
   Max: 25

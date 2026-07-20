@@ -145,8 +145,8 @@ RSpec.describe FitsJruby::SocketServer do
     server.start
     wait_for_socket
 
-    # Send more than MAX_REQUEST_BYTES bytes without a newline.
-    oversized = ('A' * (FitsJruby::SocketServer::MAX_REQUEST_BYTES + 100))
+    # Send more than the request-line byte cap without a newline.
+    oversized = ('A' * (FitsJruby::ConnectionReader::DEFAULT_MAX_BYTES + 100))
     response = nil
     begin
       UNIXSocket.open(@socket_path) do |sock|
