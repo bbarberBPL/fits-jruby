@@ -13,9 +13,15 @@ to the `fits` group.
 - JRuby 9.4.15.0 installed via rbenv under the service user's home, **or**
   installed to a shared prefix such as `/usr/local`.
 - FITS 1.6.0 unzipped to a stable location, e.g. `/opt/fits-1.6.0`.
+- **FITS tool OS dependencies installed** — the OS packages FITS's bundled tools
+  need (python3, the ExifTool Perl libraries, MediaInfo libs, the `file`
+  command). The Docker image installs these automatically, but a host/systemd
+  install must install them manually; see
+  [INSTALL.md](INSTALL.md) → "FITS tool OS dependencies". Without them the
+  server boots but examinations fail or degrade.
 - The `fits-jruby` repository checked out to a stable location, e.g.
   `/opt/fits-jruby`.
-- Dependencies installed: `cd /opt/fits-jruby && bundle install --without development test`.
+- Dependencies installed: `cd /opt/fits-jruby && bundle config set --local without 'development test' && bundle install`.
 
 ---
 
@@ -197,6 +203,28 @@ with `journalctl -u fits.service`.
 
 ---
 
+## Operational behavior
+
+A few runtime behaviors are worth knowing when reasoning about the service or
+configuring alerts:
+
+- **Socket permissions.** The Unix socket is created with mode `0660` in code on
+  bind (group-restricted), not left to the ambient umask. Who can connect is
+  therefore determined by the process's group plus this mode — a permissive
+  umask cannot make the socket world-connectable. Group ownership comes from the
+  process's gid (`Group=fits` in the unit); the server does not `chown`.
+- **Worker self-healing.** The single worker thread self-heals on unexpected
+  crashes: if it dies while the server is running it is respawned automatically
+  (with a short increasing backoff). This is transparent and needs no action.
+- **Repeated-crash give-up.** If the worker crashes repeatedly (sustained OOM,
+  persistent fatal error), the server stops thrashing after
+  `MAX_CONSECUTIVE_RESPAWNS` (5) rapid respawns, logs a single fatal line of the
+  form `worker repeatedly crashed (N times); giving up respawning`, and then
+  **exits the process non-zero** so systemd's `Restart=on-failure` starts a
+  clean one. **Alert on that fatal log line** — it means every request was
+  hanging until the restart, and a recurring pattern points at a systemic
+  problem (bad config, chronic OOM) that a restart alone will not fix.
+
 ## Monitoring
 
 ### Polling STATS
@@ -298,7 +326,7 @@ The service unit sets these `JAVA_OPTS` by default:
 
 | Flag | Purpose |
 |------|---------|
-| `-Xms256m` | Initial heap. Setting it near `-Xmx` avoids repeated heap-growth pauses. |
+| `-Xms256m` | Initial heap. Kept modest (1/4 of `-Xmx`) so the process starts lean; the JVM grows the heap toward `-Xmx1g` on demand. Raise it toward `-Xmx` only if early heap-growth pauses become a concern. |
 | `-Xmx1g` | Maximum heap. FITS is comfortable under 512 MB for ordinary files; 1 GB gives headroom for larger media. |
 | `-XX:+UseG1GC` | G1 garbage collector (default on JDK 17). Suits a moderate heap with low-pause goals. |
 | `-XX:MaxGCPauseMillis=200` | Target maximum GC pause of 200 ms. |

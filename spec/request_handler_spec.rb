@@ -65,4 +65,69 @@ RSpec.describe FitsJruby::RequestHandler do
       expect(handler.handle("#{file.path}\n")).to eq('ERROR: examination failed: boom')
     end
   end
+
+  it 'accepts a path anywhere when no allowlist is configured (default off)' do
+    Tempfile.create(['sample', '.tif']) do |file|
+      allow(examiner).to receive(:examine).with(file.path).and_return('<fits/>')
+      expect(handler.handle("#{file.path}\n")).to eq('<fits/>')
+    end
+  end
+
+  # ── Path confinement (FITS_ALLOWED_ROOTS) ────────────────────────────────
+
+  context 'with an allowlist configured' do
+    around do |example|
+      Dir.mktmpdir do |allowed|
+        Dir.mktmpdir do |outside|
+          @allowed = allowed
+          @outside = outside
+          example.run
+        end
+      end
+    end
+
+    subject(:handler) do
+      described_class.new(examiner: examiner, metrics: metrics, allowed_roots: [@allowed])
+    end
+
+    it 'accepts a file inside an allowed root and delegates to the examiner' do
+      path = File.join(@allowed, 'sample.tif')
+      File.write(path, 'data')
+      allow(examiner).to receive(:examine).with(path).and_return('<fits/>')
+      expect(handler.handle("#{path}\n")).to eq('<fits/>')
+    end
+
+    it 'rejects a file outside all allowed roots' do
+      path = File.join(@outside, 'sample.tif')
+      File.write(path, 'data')
+      expect(examiner).not_to receive(:examine)
+      expect(handler.handle("#{path}\n")).to eq("ERROR: path not allowed: #{path}")
+    end
+
+    it 'rejects a symlink inside an allowed root that points outside all roots' do
+      target = File.join(@outside, 'secret.tif')
+      File.write(target, 'secret')
+      link = File.join(@allowed, 'link.tif')
+      File.symlink(target, link)
+      expect(examiner).not_to receive(:examine)
+      expect(handler.handle("#{link}\n")).to eq("ERROR: path not allowed: #{link}")
+    end
+
+    it 'rejects a sibling directory that shares a name prefix with an allowed root' do
+      sibling = "#{@allowed}-evil"
+      FileUtils.mkdir_p(sibling)
+      path = File.join(sibling, 'sample.tif')
+      File.write(path, 'data')
+      expect(examiner).not_to receive(:examine)
+      expect(handler.handle("#{path}\n")).to eq("ERROR: path not allowed: #{path}")
+    ensure
+      FileUtils.rm_rf(sibling) if sibling
+    end
+
+    it 'still reports a missing file cleanly rather than crashing on realpath' do
+      path = File.join(@allowed, 'nope.tif')
+      expect(examiner).not_to receive(:examine)
+      expect(handler.handle("#{path}\n")).to match(/\AERROR: no such file: #{Regexp.escape(path)}\z/)
+    end
+  end
 end

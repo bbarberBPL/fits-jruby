@@ -17,8 +17,13 @@ Metrics/BlockLength:
 Metrics/ClassLength:
   # SocketServer coordinates the socket lifecycle, acceptor/worker threads,
   # graceful drain, and bounded writes. The line protocol was extracted to
-  # ConnectionReader; the remainder is cohesive. 160 reflects the actual size.
-  Max: 160
+  # ConnectionReader; the remainder is cohesive. Bumped 160 -> 170 for the
+  # audit-hardening additions (queue-drain-on-stop + worker self-heal respawn),
+  # then 170 -> 185 for the atomic @running conversion and the respawn
+  # backoff/cap self-heal policy, then 185 -> 190 for the on_repeated_crash
+  # seam (give-up path exits the process for the supervisor to restart).
+  # 190 reflects the actual measured size.
+  Max: 190
 
 Metrics/MethodLength:
   Max: 25

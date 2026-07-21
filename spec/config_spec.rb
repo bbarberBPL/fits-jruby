@@ -2,6 +2,7 @@
 
 require 'tmpdir'
 require 'fileutils'
+require 'tempfile'
 require 'fits_jruby/config'
 
 RSpec.describe FitsJruby::Config do
@@ -131,5 +132,62 @@ RSpec.describe FitsJruby::Config do
   it 'validate! raises on negative write timeout' do
     expect { described_class.new(env('FITS_WRITE_TIMEOUT' => '-2')).validate! }
       .to raise_error(FitsJruby::Config::Error, /invalid write timeout/i)
+  end
+
+  # ── FITS_ALLOWED_ROOTS ────────────────────────────────────────────────────
+
+  it 'defaults allowed_roots to an empty array when unset' do
+    expect(described_class.new(env).allowed_roots).to eq([])
+  end
+
+  it 'treats an empty FITS_ALLOWED_ROOTS as no confinement' do
+    expect(described_class.new(env('FITS_ALLOWED_ROOTS' => '')).allowed_roots).to eq([])
+  end
+
+  it 'parses a single allowed root' do
+    Dir.mktmpdir do |root|
+      expect(described_class.new(env('FITS_ALLOWED_ROOTS' => root)).allowed_roots)
+        .to eq([root])
+    end
+  end
+
+  it 'parses multiple colon-separated allowed roots' do
+    Dir.mktmpdir do |a|
+      Dir.mktmpdir do |b|
+        expect(described_class.new(env('FITS_ALLOWED_ROOTS' => "#{a}:#{b}")).allowed_roots)
+          .to eq([a, b])
+      end
+    end
+  end
+
+  it 'ignores empty segments between separators' do
+    Dir.mktmpdir do |root|
+      expect(described_class.new(env('FITS_ALLOWED_ROOTS' => "#{root}::")).allowed_roots)
+        .to eq([root])
+    end
+  end
+
+  it 'validate! raises when an allowed root is not absolute' do
+    expect { described_class.new(env('FITS_ALLOWED_ROOTS' => 'relative/dir')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /allowed root/i)
+  end
+
+  it 'validate! raises when an allowed root does not exist' do
+    expect { described_class.new(env('FITS_ALLOWED_ROOTS' => '/does/not/exist')).validate! }
+      .to raise_error(FitsJruby::Config::Error, /allowed root/i)
+  end
+
+  it 'validate! raises when an allowed root is a file, not a directory' do
+    Tempfile.create('root') do |file|
+      expect { described_class.new(env('FITS_ALLOWED_ROOTS' => file.path)).validate! }
+        .to raise_error(FitsJruby::Config::Error, /allowed root/i)
+    end
+  end
+
+  it 'validate! passes when all allowed roots are absolute directories' do
+    Dir.mktmpdir do |root|
+      expect { described_class.new(env('FITS_ALLOWED_ROOTS' => root)).validate! }
+        .not_to raise_error
+    end
   end
 end

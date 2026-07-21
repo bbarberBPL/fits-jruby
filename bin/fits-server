@@ -15,7 +15,11 @@ end
 
 metrics = FitsJruby::Metrics.new
 examiner = FitsJruby::FitsExaminer.new(config.fits_home)
-handler = FitsJruby::RequestHandler.new(examiner: examiner, metrics: metrics)
+handler = FitsJruby::RequestHandler.new(
+  examiner: examiner,
+  metrics: metrics,
+  allowed_roots: config.allowed_roots
+)
 server = FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics)
 
 shutdown = proc do

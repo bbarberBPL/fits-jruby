@@ -32,6 +32,7 @@ The server logs to stdout and listens on `/tmp/fits.sock` by default. Press
 | `FITS_LOG_LEVEL`      | `info`           | No       | Logging verbosity. One of `debug`, `info`, `warn`, or `error`.                               |
 | `FITS_READ_TIMEOUT`   | `5`              | No       | Seconds to wait for a client to send a complete request line. Clients that connect and never send a newline are disconnected after this timeout, keeping the worker free. |
 | `FITS_WRITE_TIMEOUT`  | `30`             | No       | Seconds to wait for a client to accept the response. Clients that stop reading are abandoned after this timeout so the worker is never wedged. |
+| `FITS_ALLOWED_ROOTS`  | *(none)*         | No       | Optional colon-separated list of absolute directories to confine examinations to (e.g. `/srv/media:/data`). When unset (default), any file the server's user can read may be examined. When set, a requested path is canonicalized with `realpath` (resolving symlinks and `..`) and rejected with `ERROR: path not allowed` unless it resolves under one of these roots. Each root must be an existing absolute directory or the server exits at boot. |
 
 The server validates `FITS_HOME` at boot and exits non-zero with a clear error
 message if it is missing or does not contain a `lib/` directory.
@@ -132,6 +133,11 @@ which configures a console-only appender with no file appender. This means:
 - No stray `fits.log` is ever created in the working directory.
 - All logs (Ruby + FITS) are captured together by your process supervisor
   (journald, Docker, etc.) from stdout/stderr.
+
+The socket is created group-restricted (mode `0660`), and the single worker
+self-heals on unexpected crashes; if it crashes repeatedly the server logs a
+`worker repeatedly crashed (N times); giving up respawning` fatal line and exits
+non-zero so the supervisor restarts a clean process.
 
 ## Protocol
 

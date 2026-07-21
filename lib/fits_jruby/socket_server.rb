@@ -13,6 +13,15 @@ module FitsJruby
     # Sentinel pushed onto the queue to signal the worker to shut down.
     SHUTDOWN = Object.new.freeze
 
+    # Self-heal policy: cap consecutive rapid respawns so a worker that dies
+    # immediately and repeatedly (sustained OOM, repeated fatal error) cannot
+    # thrash the JVM with unbounded thread churn + a log flood.
+    MAX_CONSECUTIVE_RESPAWNS = 5
+    # A worker that has run healthily for at least this long (measured from its
+    # last respawn) is considered recovered, so the consecutive-respawn counter
+    # resets and a fresh transient crash still self-heals.
+    RESPAWN_RESET_INTERVAL = 60 # seconds
+
     def initialize(config:, handler:, metrics:, logger: nil)
       @config = config
       @handler = handler
@@ -20,9 +29,15 @@ module FitsJruby
       @logger = logger || default_logger(config.log_level)
       @queue = SizedQueue.new(config.queue_capacity)
       @reader = ConnectionReader.new
-      @running = false
+      # Atomic so the flag written by stop is reliably observed by a worker's
+      # ensure block even when the worker was terminated via Thread#kill (no
+      # ordinary happens-before edge exists on that path). Prevents a respawn
+      # from racing shutdown and leaking a thread blocked on @queue.pop.
+      @running = java.util.concurrent.atomic.AtomicBoolean.new(false)
       @stopped = false
       @stop_mutex = Mutex.new
+      @respawn_count = 0
+      @last_respawn_at = nil
     end
 
     def socket_path
@@ -32,7 +47,12 @@ module FitsJruby
     def start
       remove_stale_socket
       @server = UNIXServer.new(socket_path)
-      @running = true
+      # Enforce 0660 in code rather than relying on the ambient umask, so a
+      # permissive umask cannot yield a world-connectable socket. Group
+      # ownership comes from the process's gid; we deliberately do not chown
+      # (uid/gid mapping is deployment-specific).
+      File.chmod(0o660, socket_path)
+      @running.set(true)
       @stopped = false
       @worker = Thread.new { worker_loop }
       @acceptor = Thread.new { acceptor_loop }
@@ -48,11 +68,17 @@ module FitsJruby
         @stopped = true
       end
 
-      @running = false
-      drain_worker         # push sentinel so worker exits after current serve
+      @running.set(false)
+      # Order matters: stop ACCEPTING first, then drain the worker. Closing the
+      # listening socket makes the acceptor's blocked accept raise IOError/EBADF
+      # so it breaks; joining it guarantees no new connection can be enqueued
+      # after the SHUTDOWN sentinel (which would otherwise be popped-past and
+      # leak, hanging its client).
       close_server_socket  # unblocks the acceptor (closed socket raises IOError)
+      join_acceptor        # guaranteed to exit now the listening socket is gone
+      drain_worker         # push sentinel so worker exits after current serve
+      drain_pending_connections # close anything left in the queue (fail fast)
       remove_stale_socket
-      join_acceptor
       @logger.info('stopped')
     end
 
@@ -72,13 +98,25 @@ module FitsJruby
       @worker.kill
     end
 
+    # After the worker has exited, close any connections still queued (enqueued
+    # before shutdown but never served). Without this their clients would hang
+    # until their own timeout; closing gives them a fast-failing closed socket.
+    def drain_pending_connections
+      loop do
+        conn = @queue.pop(true)
+        safe_close(conn) unless conn.equal?(SHUTDOWN)
+      end
+    rescue ThreadError
+      # queue empty
+    end
+
     def join_acceptor
       @acceptor&.join(1)
       @acceptor&.kill
     end
 
     def acceptor_loop
-      while @running
+      while @running.get
         begin
           connection = @server.accept
           @metrics.enqueue
@@ -110,7 +148,57 @@ module FitsJruby
         end
       end
     ensure
-      @logger.error('worker loop exited unexpectedly while running') if @running
+      respawn_worker_if_crashed
+    end
+
+    # A clean shutdown pops the SHUTDOWN sentinel with @running already false, so
+    # this is a no-op. Any other exit while @running is still true means the
+    # worker died unexpectedly (e.g. @queue.pop or the sentinel check raised) —
+    # the single worker is a SPOF (STATS is served by it too), so self-heal by
+    # respawning. The atomic @running guard prevents a respawn loop after stop:
+    # stop's @running.set(false) publishes a memory barrier the killed worker's
+    # ensure reliably observes, so no worker is respawned during shutdown.
+    #
+    # Backoff + cap: if the worker keeps dying immediately (sustained OOM,
+    # repeated fatal error) we would otherwise churn threads and flood the log.
+    # We sleep a small increasing backoff before each respawn and, after
+    # MAX_CONSECUTIVE_RESPAWNS rapid respawns, give up. Giving up does NOT leave
+    # a half-dead process: with no worker the acceptor would keep enqueuing
+    # connections that never drain (every client hangs, STATS is dead), so we
+    # invoke the terminal action (@on_repeated_crash, hard exit by default) to
+    # let the supervisor restart a clean process. A worker that survives
+    # RESPAWN_RESET_INTERVAL is treated as recovered and resets the counter, so
+    # a later transient crash self-heals again.
+    def respawn_worker_if_crashed
+      return unless @running.get
+
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @respawn_count = 0 if @last_respawn_at && (now - @last_respawn_at) > RESPAWN_RESET_INTERVAL
+
+      if @respawn_count >= MAX_CONSECUTIVE_RESPAWNS
+        @logger.fatal("worker repeatedly crashed (#{@respawn_count} times); giving up respawning")
+        on_repeated_crash.call
+        return
+      end
+
+      @respawn_count += 1
+      sleep [0.1 * @respawn_count, 5].min
+      return unless @running.get # stop may have fired during the backoff sleep
+
+      @last_respawn_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @logger.error("worker loop exited unexpectedly while running; respawning (attempt #{@respawn_count})")
+      @worker = Thread.new { worker_loop }
+    end
+
+    # Terminal action taken when the worker crashes past the respawn cap.
+    # Behind a seam (memoized, overridable via @on_repeated_crash) so it is
+    # testable without exiting the test runner: the default hard-exits non-zero
+    # so systemd's Restart=on-failure fires; a spec sets @on_repeated_crash to
+    # record the call instead. java.lang.System.exit is used over Kernel#exit
+    # because this runs on the crashed worker thread's ensure path and must be
+    # unconditional — not swallowed by any surrounding rescue.
+    def on_repeated_crash
+      @on_repeated_crash ||= -> { java.lang.System.exit(1) }
     end
 
     def safe_close(connection)

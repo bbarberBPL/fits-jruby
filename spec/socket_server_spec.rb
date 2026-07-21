@@ -115,6 +115,272 @@ RSpec.describe FitsJruby::SocketServer do
     expect { UNIXSocket.new(@socket_path) }.to raise_error(Errno::ENOENT, /No such file/)
   end
 
+  # ── Fix A: shutdown race — queued connections are closed, never leaked ─────
+  #
+  # A connection that was enqueued before shutdown but is still sitting in the
+  # queue when the worker exits (e.g. the worker had to be killed mid-serve)
+  # must be closed by drain_pending_connections, so its client fails fast on a
+  # closed socket rather than hanging until its own timeout.
+  #
+  # Determinism: we occupy the worker with an in-flight examine that blocks on a
+  # latch, so the connection we enqueue afterward is GUARANTEED to still be in
+  # the queue (the busy worker cannot pop it). We then invoke the drain directly
+  # and prove IT — not the worker — is what closed the leftover.
+  it 'drains and closes connections left in the queue instead of leaking them' do
+    latch_start = Queue.new
+    latch_resume = Queue.new
+    slow = Object.new
+    slow.define_singleton_method(:examine) do |_path|
+      latch_start.push(:ready)
+      latch_resume.pop
+      '<?xml version="1.0"?><fits/>'
+    end
+
+    server, = build_server(slow)
+    server.start
+    wait_for_socket
+
+    # Occupy the single worker with an in-flight, blocked examine.
+    Thread.new { Tempfile.create(['a', '.tif']) { |f| request(f.path) } }
+    latch_start.pop
+
+    queue = server.instance_variable_get(:@queue)
+    closed = false
+    leftover = Object.new
+    leftover.define_singleton_method(:closed?) { false }
+    leftover.define_singleton_method(:close) { closed = true }
+    queue.push(leftover)
+
+    # The worker is busy, so the leftover is still queued — not yet closed.
+    expect(closed).to be(false)
+
+    # The drain (not the worker) closes it.
+    server.send(:drain_pending_connections)
+    expect(closed).to be(true)
+
+    latch_resume.push(:go) # release the in-flight serve so stop can finish
+  ensure
+    server&.stop
+  end
+
+  it 'completes stop promptly and closes a connection queued behind an in-flight serve' do
+    latch_start = Queue.new
+    latch_resume = Queue.new
+    slow = Object.new
+    slow.define_singleton_method(:examine) do |_path|
+      latch_start.push(:ready)
+      latch_resume.pop
+      '<?xml version="1.0"?><fits/>'
+    end
+
+    server, = build_server(slow)
+    server.start
+    wait_for_socket
+
+    # Occupy the worker.
+    Thread.new do
+      Tempfile.create(['a', '.tif']) { |f| request(f.path) }
+    end
+    latch_start.pop
+
+    # Enqueue a second connection that will sit in the queue during shutdown.
+    queued = UNIXSocket.new(@socket_path)
+
+    # Let the in-flight serve finish, then stop.
+    latch_resume.push(:go)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    server.stop
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    expect(elapsed).to be < 6 # no indefinite hang; well under worker kill(5s)
+
+    # The queued client must be closed promptly (served-then-closed or drained),
+    # NOT left hanging. Prove it with a bounded read that must return, never
+    # block indefinitely.
+    read_result = Thread.new do
+      queued.read
+    rescue Errno::ECONNRESET, IOError
+      :closed
+    end.join(5)
+    expect(read_result).not_to be_nil # the read returned; no indefinite hang
+  ensure
+    queued&.close rescue nil # rubocop:disable Style/RescueModifier
+  end
+
+  # ── Fix B: socket mode enforced at 0660 regardless of umask ────────────────
+
+  it 'creates the socket with mode 0660 regardless of the ambient umask' do
+    server, = build_server(FakeExaminer.new)
+    old_umask = File.umask(0o000) # permissive umask would yield 0777 without chmod
+    begin
+      server.start
+      wait_for_socket
+      expect(File.stat(@socket_path).mode & 0o777).to eq(0o660)
+    ensure
+      File.umask(old_umask)
+      server.stop
+    end
+  end
+
+  # ── Fix C: worker self-heals if it dies unexpectedly while running ─────────
+
+  it 'respawns the worker if it dies unexpectedly and keeps serving' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    original = server.instance_variable_get(:@worker)
+    # Simulate an unexpected worker death while @running is true. Thread#kill
+    # runs the worker_loop ensure block, which respawns because @running.
+    original.kill
+    original.join
+
+    # Give the respawn a moment.
+    20.times do
+      break if server.instance_variable_get(:@worker) != original
+
+      sleep 0.05
+    end
+
+    current = server.instance_variable_get(:@worker)
+    expect(current).not_to equal(original)
+    expect(current.alive?).to be(true)
+
+    # And the server still answers a request.
+    expect(request('STATS')).to start_with('{')
+  ensure
+    server&.stop
+  end
+
+  # ── Fix 1: @running is atomic so stop never respawns during shutdown ───────
+  #
+  # The worker KILL-fallback path (drain_worker's join(5) timeout → @worker.kill)
+  # runs the worker_loop ensure, which reads @running. With a plain non-volatile
+  # boolean there is no happens-before edge between stop's write and that
+  # killed-thread read, so the JVM could observe a stale `true` and respawn a
+  # worker during shutdown — leaking a thread blocked on @queue.pop. The atomic
+  # gives the memory barrier. Forcing the real 5s kill path in a unit test would
+  # need a 5s+ block, so we assert the invariant directly: stop clears the
+  # atomic before draining, and the respawn guard reads it and refuses.
+  it 'uses an atomic for @running so the respawn guard reliably sees shutdown' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    running = server.instance_variable_get(:@running)
+    expect(running).to be_a(java.util.concurrent.atomic.AtomicBoolean)
+    expect(running.get).to be(true)
+
+    server.stop
+
+    # stop cleared the atomic (memory-barrier publish observed by any thread).
+    expect(running.get).to be(false)
+    # The worker is not alive and was not respawned during shutdown.
+    expect(server.instance_variable_get(:@worker).alive?).to be(false)
+  end
+
+  it 'does not respawn a worker when the guard runs after stop (kill-path invariant)' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+    server.stop
+
+    worker_before = server.instance_variable_get(:@worker)
+    # Directly invoke the guard exactly as a killed worker's ensure would; with
+    # @running already false it must be a no-op — no new thread, no log spam.
+    expect { server.send(:respawn_worker_if_crashed) }.not_to raise_error
+    expect(server.instance_variable_get(:@worker)).to equal(worker_before)
+    expect(worker_before.alive?).to be(false)
+  end
+
+  # ── Fix 2: respawn backoff + cap prevents thrash on persistent failure ─────
+
+  it 'stops respawning after repeated rapid crashes and logs a single fatal' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    logger = server.instance_variable_get(:@logger)
+    fatal_messages = []
+    logger.define_singleton_method(:fatal) { |msg| fatal_messages << msg }
+
+    # Stub the terminal action so the give-up branch does not exit the runner.
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
+    # Simulate the cap already being reached; the next guard call must give up.
+    server.instance_variable_set(:@respawn_count,
+                                 FitsJruby::SocketServer::MAX_CONSECUTIVE_RESPAWNS)
+    worker_before = server.instance_variable_get(:@worker)
+
+    server.send(:respawn_worker_if_crashed)
+
+    expect(server.instance_variable_get(:@worker)).to equal(worker_before)
+    expect(fatal_messages.size).to eq(1)
+    expect(fatal_messages.first).to match(/repeatedly crashed/)
+    # The terminal action fires exactly once so the supervisor restarts a
+    # clean process rather than leaving a workerless (hung) server.
+    expect(terminal_calls).to eq(1)
+  ensure
+    server&.stop
+  end
+
+  # ── Fix: give-up path exits so supervisor restarts; transient crash does not ─
+  #
+  # The default terminal action is java.lang.System.exit(1); a spec must never
+  # trigger it (it would kill the runner), so we stub it and assert the seam
+  # fires exactly once when the cap is exceeded and NOT on a single transient
+  # crash (which must still self-heal by respawning).
+  it 'defaults the terminal crash action to a callable hard exit' do
+    server, = build_server(FakeExaminer.new)
+    # Inspect the default seam WITHOUT invoking it (calling it would exit).
+    action = server.send(:on_repeated_crash)
+    expect(action).to respond_to(:call)
+    expect(action).to be_a(Proc)
+  end
+
+  it 'does not fire the terminal action on a single transient crash (self-heals)' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
+    original = server.instance_variable_get(:@worker)
+    # One unexpected death: the guard must respawn, not give up/exit.
+    original.kill
+    original.join
+
+    20.times do
+      break if server.instance_variable_get(:@worker) != original
+
+      sleep 0.05
+    end
+
+    expect(terminal_calls).to eq(0)
+    expect(server.instance_variable_get(:@worker)).not_to equal(original)
+    expect(server.instance_variable_get(:@worker).alive?).to be(true)
+  ensure
+    server&.stop
+  end
+
+  it 'does not fire the terminal action on a normal clean stop' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
+    server.stop
+    # The guard is a no-op after stop (@running false), so even if invoked
+    # directly as a killed worker's ensure would, it must not exit.
+    server.send(:respawn_worker_if_crashed)
+
+    expect(terminal_calls).to eq(0)
+  end
+
   # ── Fix C1: read timeout — stalled client does not wedge the worker ──────
 
   it 'responds with ERROR: read timeout when client connects but never sends a newline' do
