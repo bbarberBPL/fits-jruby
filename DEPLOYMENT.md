@@ -203,6 +203,28 @@ with `journalctl -u fits.service`.
 
 ---
 
+## Operational behavior
+
+A few runtime behaviors are worth knowing when reasoning about the service or
+configuring alerts:
+
+- **Socket permissions.** The Unix socket is created with mode `0660` in code on
+  bind (group-restricted), not left to the ambient umask. Who can connect is
+  therefore determined by the process's group plus this mode — a permissive
+  umask cannot make the socket world-connectable. Group ownership comes from the
+  process's gid (`Group=fits` in the unit); the server does not `chown`.
+- **Worker self-healing.** The single worker thread self-heals on unexpected
+  crashes: if it dies while the server is running it is respawned automatically
+  (with a short increasing backoff). This is transparent and needs no action.
+- **Repeated-crash give-up.** If the worker crashes repeatedly (sustained OOM,
+  persistent fatal error), the server stops thrashing after
+  `MAX_CONSECUTIVE_RESPAWNS` (5) rapid respawns, logs a single fatal line of the
+  form `worker repeatedly crashed (N times); giving up respawning`, and then
+  **exits the process non-zero** so systemd's `Restart=on-failure` starts a
+  clean one. **Alert on that fatal log line** — it means every request was
+  hanging until the restart, and a recurring pattern points at a systemic
+  problem (bad config, chronic OOM) that a restart alone will not fix.
+
 ## Monitoring
 
 ### Polling STATS

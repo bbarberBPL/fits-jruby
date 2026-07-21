@@ -162,10 +162,13 @@ module FitsJruby
     # Backoff + cap: if the worker keeps dying immediately (sustained OOM,
     # repeated fatal error) we would otherwise churn threads and flood the log.
     # We sleep a small increasing backoff before each respawn and, after
-    # MAX_CONSECUTIVE_RESPAWNS rapid respawns, give up (log once, stay
-    # degraded-but-not-thrashing). A worker that survives RESPAWN_RESET_INTERVAL
-    # is treated as recovered and resets the counter, so a later transient crash
-    # self-heals again.
+    # MAX_CONSECUTIVE_RESPAWNS rapid respawns, give up. Giving up does NOT leave
+    # a half-dead process: with no worker the acceptor would keep enqueuing
+    # connections that never drain (every client hangs, STATS is dead), so we
+    # invoke the terminal action (@on_repeated_crash, hard exit by default) to
+    # let the supervisor restart a clean process. A worker that survives
+    # RESPAWN_RESET_INTERVAL is treated as recovered and resets the counter, so
+    # a later transient crash self-heals again.
     def respawn_worker_if_crashed
       return unless @running.get
 
@@ -174,6 +177,7 @@ module FitsJruby
 
       if @respawn_count >= MAX_CONSECUTIVE_RESPAWNS
         @logger.fatal("worker repeatedly crashed (#{@respawn_count} times); giving up respawning")
+        on_repeated_crash.call
         return
       end
 
@@ -184,6 +188,17 @@ module FitsJruby
       @last_respawn_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       @logger.error("worker loop exited unexpectedly while running; respawning (attempt #{@respawn_count})")
       @worker = Thread.new { worker_loop }
+    end
+
+    # Terminal action taken when the worker crashes past the respawn cap.
+    # Behind a seam (memoized, overridable via @on_repeated_crash) so it is
+    # testable without exiting the test runner: the default hard-exits non-zero
+    # so systemd's Restart=on-failure fires; a spec sets @on_repeated_crash to
+    # record the call instead. java.lang.System.exit is used over Kernel#exit
+    # because this runs on the crashed worker thread's ensure path and must be
+    # unconditional — not swallowed by any surrounding rescue.
+    def on_repeated_crash
+      @on_repeated_crash ||= -> { java.lang.System.exit(1) }
     end
 
     def safe_close(connection)

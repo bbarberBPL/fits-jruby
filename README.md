@@ -134,6 +134,11 @@ which configures a console-only appender with no file appender. This means:
 - All logs (Ruby + FITS) are captured together by your process supervisor
   (journald, Docker, etc.) from stdout/stderr.
 
+The socket is created group-restricted (mode `0660`), and the single worker
+self-heals on unexpected crashes; if it crashes repeatedly the server logs a
+`worker repeatedly crashed (N times); giving up respawning` fatal line and exits
+non-zero so the supervisor restarts a clean process.
+
 ## Protocol
 
 ### Examining a file

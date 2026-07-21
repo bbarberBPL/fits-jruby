@@ -304,6 +304,10 @@ RSpec.describe FitsJruby::SocketServer do
     fatal_messages = []
     logger.define_singleton_method(:fatal) { |msg| fatal_messages << msg }
 
+    # Stub the terminal action so the give-up branch does not exit the runner.
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
     # Simulate the cap already being reached; the next guard call must give up.
     server.instance_variable_set(:@respawn_count,
                                  FitsJruby::SocketServer::MAX_CONSECUTIVE_RESPAWNS)
@@ -314,8 +318,67 @@ RSpec.describe FitsJruby::SocketServer do
     expect(server.instance_variable_get(:@worker)).to equal(worker_before)
     expect(fatal_messages.size).to eq(1)
     expect(fatal_messages.first).to match(/repeatedly crashed/)
+    # The terminal action fires exactly once so the supervisor restarts a
+    # clean process rather than leaving a workerless (hung) server.
+    expect(terminal_calls).to eq(1)
   ensure
     server&.stop
+  end
+
+  # ── Fix: give-up path exits so supervisor restarts; transient crash does not ─
+  #
+  # The default terminal action is java.lang.System.exit(1); a spec must never
+  # trigger it (it would kill the runner), so we stub it and assert the seam
+  # fires exactly once when the cap is exceeded and NOT on a single transient
+  # crash (which must still self-heal by respawning).
+  it 'defaults the terminal crash action to a callable hard exit' do
+    server, = build_server(FakeExaminer.new)
+    # Inspect the default seam WITHOUT invoking it (calling it would exit).
+    action = server.send(:on_repeated_crash)
+    expect(action).to respond_to(:call)
+    expect(action).to be_a(Proc)
+  end
+
+  it 'does not fire the terminal action on a single transient crash (self-heals)' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
+    original = server.instance_variable_get(:@worker)
+    # One unexpected death: the guard must respawn, not give up/exit.
+    original.kill
+    original.join
+
+    20.times do
+      break if server.instance_variable_get(:@worker) != original
+
+      sleep 0.05
+    end
+
+    expect(terminal_calls).to eq(0)
+    expect(server.instance_variable_get(:@worker)).not_to equal(original)
+    expect(server.instance_variable_get(:@worker).alive?).to be(true)
+  ensure
+    server&.stop
+  end
+
+  it 'does not fire the terminal action on a normal clean stop' do
+    server, = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+
+    terminal_calls = 0
+    server.instance_variable_set(:@on_repeated_crash, -> { terminal_calls += 1 })
+
+    server.stop
+    # The guard is a no-op after stop (@running false), so even if invoked
+    # directly as a killed worker's ensure would, it must not exit.
+    server.send(:respawn_worker_if_crashed)
+
+    expect(terminal_calls).to eq(0)
   end
 
   # ── Fix C1: read timeout — stalled client does not wedge the worker ──────
