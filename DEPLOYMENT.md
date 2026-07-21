@@ -13,9 +13,15 @@ to the `fits` group.
 - JRuby 9.4.15.0 installed via rbenv under the service user's home, **or**
   installed to a shared prefix such as `/usr/local`.
 - FITS 1.6.0 unzipped to a stable location, e.g. `/opt/fits-1.6.0`.
+- **FITS tool OS dependencies installed** — the OS packages FITS's bundled tools
+  need (python3, the ExifTool Perl libraries, MediaInfo libs, the `file`
+  command). The Docker image installs these automatically, but a host/systemd
+  install must install them manually; see
+  [INSTALL.md](INSTALL.md) → "FITS tool OS dependencies". Without them the
+  server boots but examinations fail or degrade.
 - The `fits-jruby` repository checked out to a stable location, e.g.
   `/opt/fits-jruby`.
-- Dependencies installed: `cd /opt/fits-jruby && bundle install --without development test`.
+- Dependencies installed: `cd /opt/fits-jruby && bundle config set --local without 'development test' && bundle install`.
 
 ---
 
@@ -298,7 +304,7 @@ The service unit sets these `JAVA_OPTS` by default:
 
 | Flag | Purpose |
 |------|---------|
-| `-Xms256m` | Initial heap. Setting it near `-Xmx` avoids repeated heap-growth pauses. |
+| `-Xms256m` | Initial heap. Kept modest (1/4 of `-Xmx`) so the process starts lean; the JVM grows the heap toward `-Xmx1g` on demand. Raise it toward `-Xmx` only if early heap-growth pauses become a concern. |
 | `-Xmx1g` | Maximum heap. FITS is comfortable under 512 MB for ordinary files; 1 GB gives headroom for larger media. |
 | `-XX:+UseG1GC` | G1 garbage collector (default on JDK 17). Suits a moderate heap with low-pause goals. |
 | `-XX:MaxGCPauseMillis=200` | Target maximum GC pause of 200 ms. |

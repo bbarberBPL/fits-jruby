@@ -49,9 +49,11 @@ module FitsJruby
 
       real = File.realpath(path)
       @allowed_roots.any? { |root| under_root?(real, root) }
-    rescue Errno::ENOENT
-      # A file that existed for the checks above but vanished (or a broken
-      # symlink) is treated as not allowed rather than crashing.
+    rescue SystemCallError
+      # realpath can raise ENOENT (file vanished / broken symlink after the
+      # earlier checks), ELOOP (symlink loop), EACCES, ENOTDIR, etc. Any such
+      # failure to canonicalize is treated as not allowed (fail closed) rather
+      # than crashing the worker.
       false
     end
 
