@@ -174,6 +174,27 @@ Design:
 The permission checks are unit-tested at the `verify_socket_dir!` level with a
 stubbed `File.lstat` so we don't need to actually create foreign-owned dirs.
 
+**Documentation (required for this fix):** the tmpdir-only gating is subtle and
+easy to misread as "the server checks socket-dir permissions" in general, so it
+must be documented clearly in three places:
+- **Code comment** on `verify_socket_dir!` (and/or `ensure_socket_dir`) stating
+  exactly which case is checked and why the XDG/systemd and explicit
+  `FITS_SOCKET_PATH` cases are deliberately exempt (platform-owned /
+  operator-chosen; `/run/fits` is typically 0755 service-owned, so a strict
+  0700+uid check there would break legitimate deployments).
+- **README.md** `FITS_SOCKET_PATH` row / notes: state that when the per-user
+  **tmpdir fallback** (`/tmp/fits-<uid>/…`) is used, the server refuses to start
+  if that directory pre-exists and is not a directory owned by the server's uid
+  with mode `0700` (anti-squat hardening); the XDG runtime dir and an explicit
+  `FITS_SOCKET_PATH` are trusted as-is.
+- **DEPLOYMENT.md**: a note in the socket/systemd section that production should
+  set `FITS_SOCKET_PATH` (e.g. `/run/fits/fits.sock`) explicitly, and that the
+  strict tmpdir permission check applies only to the local/dev fallback — so
+  operators are not surprised when their 0755 `/run/fits` is accepted.
+
+The exact wording is the implementer's, but all three locations must be updated
+and must agree with the code. The task is not complete until they are.
+
 ### M3 — Integer env vars parsed with implicit radix
 
 **File:** `lib/fits_jruby/config.rb` (`integer_env`)
@@ -220,5 +241,8 @@ end
   test first, then the minimal change.
 - Existing suite (86 fast + 4 integration) must stay green; RuboCop clean;
   `rake audit` clean.
+- **Documentation:** the M2 tmpdir-only permission check must be documented in
+  its code comment, README.md, and DEPLOYMENT.md (see M2's Documentation
+  subsection). Reviewers verify the docs match the code.
 - Execution: subagent-driven development, with an **opus reviewer after every
   implementer task** and a final opus whole-branch review before finishing.
