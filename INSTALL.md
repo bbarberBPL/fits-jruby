@@ -212,8 +212,10 @@ The startup log shows the exact socket path. Set a shell variable for
 convenience (replace with the path printed by the server):
 
 ```bash
-# Replace with the socket path printed in the startup log above
-FITS_SOCKET="${FITS_SOCKET_PATH:-/tmp/fits-$(id -u)/fits.sock}"
+# Replace with the socket path printed in the startup log above. This mirrors
+# the server's default precedence: explicit FITS_SOCKET_PATH, else
+# $XDG_RUNTIME_DIR/fits.sock, else /tmp/fits-<uid>/fits.sock.
+FITS_SOCKET="${FITS_SOCKET_PATH:-${XDG_RUNTIME_DIR:-/tmp/fits-$(id -u)}/fits.sock}"
 
 # Use a file that actually exists on your system, for example:
 printf '/etc/hostname\n' | nc -U "$FITS_SOCKET"
