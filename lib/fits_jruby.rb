@@ -35,6 +35,7 @@ module FitsJruby
     exit 1
   end
 
+  # Internal helper for run!; not part of the public API.
   def self.install_signal_traps(server)
     shutdown = proc do
       server.stop
@@ -43,4 +44,5 @@ module FitsJruby
     Signal.trap('INT', &shutdown)
     Signal.trap('TERM', &shutdown)
   end
+  private_class_method :install_signal_traps
 end
