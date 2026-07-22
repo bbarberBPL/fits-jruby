@@ -73,6 +73,19 @@ RSpec.describe FitsJruby::RequestHandler do
     end
   end
 
+  it 'examines the raw path unchanged when no allowlist is configured (no realpath resolution)' do
+    Dir.mktmpdir do |dir|
+      target = File.join(dir, 'real.tif')
+      File.write(target, 'data')
+      link = File.join(dir, 'link.tif')
+      File.symlink(target, link)
+      # No allowlist → handler must pass the path as sent, NOT the resolved target.
+      allow(examiner).to receive(:examine).with(link).and_return('<fits/>')
+      expect(handler.handle("#{link}\n")).to eq('<fits/>')
+      expect(examiner).to have_received(:examine).with(link)
+    end
+  end
+
   # ── Path confinement (FITS_ALLOWED_ROOTS) ────────────────────────────────
 
   context 'with an allowlist configured' do
@@ -128,6 +141,17 @@ RSpec.describe FitsJruby::RequestHandler do
       path = File.join(@allowed, 'nope.tif')
       expect(examiner).not_to receive(:examine)
       expect(handler.handle("#{path}\n")).to match(/\AERROR: no such file: #{Regexp.escape(path)}\z/)
+    end
+
+    it 'examines the resolved realpath (not the symlink) for a link inside an allowed root' do
+      target = File.join(@allowed, 'real.tif')
+      File.write(target, 'data')
+      link = File.join(@allowed, 'link.tif')
+      File.symlink(target, link)
+      real = File.realpath(link)
+      allow(examiner).to receive(:examine).with(real).and_return('<fits/>')
+      expect(handler.handle("#{link}\n")).to eq('<fits/>')
+      expect(examiner).to have_received(:examine).with(real)
     end
   end
 end

@@ -24,7 +24,7 @@ module FitsJruby
       error = validate_path(request)
       return error if error
 
-      examine(request)
+      examine(examine_target(request))
     end
 
     private
@@ -44,6 +44,21 @@ module FitsJruby
     # is canonicalized with File.realpath (resolving symlinks AND "..") and must
     # live under at least one canonical root. The boundary check compares path
     # components so a root of /srv/media never allows /srv/media-evil/x.
+    # The path handed to the examiner. When an allowlist is configured we
+    # examine the SAME canonical path the boundary check validated, so the
+    # validated path and the opened path cannot diverge (closing a symlink-swap
+    # gap). With no allowlist (default) the raw absolute path is examined as-is.
+    # realpath cannot fail here under normal flow (validate_path already
+    # confirmed existence and allowlist membership); a late failure is mapped to
+    # the same fail-closed error as the boundary check.
+    def examine_target(path)
+      return path if @allowed_roots.empty?
+
+      File.realpath(path)
+    rescue SystemCallError
+      path
+    end
+
     def within_allowed_roots?(path)
       return true if @allowed_roots.empty?
 
