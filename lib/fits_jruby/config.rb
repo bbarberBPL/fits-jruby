@@ -73,10 +73,13 @@ module FitsJruby
       "#{Dir.tmpdir}/fits-#{Process.uid}/fits.sock"
     end
 
-    # Parses an integer env var, converting parse failures into Config::Error
-    # with a label-specific message (e.g. "invalid queue capacity: ...").
+    # Parses an integer env var as base-10 (so "010" is 10, not octal 8),
+    # converting parse failures into Config::Error with a label-specific
+    # message. The default is an Integer and passed through as-is because
+    # Integer(int, 10) raises "base specified for non string value".
     def integer_env(key, default, label)
-      Integer(@env.fetch(key, default))
+      raw = @env.fetch(key, default)
+      raw.is_a?(Integer) ? raw : Integer(raw, 10)
     rescue ArgumentError, TypeError
       raise Error, "invalid #{label}: #{@env[key]}"
     end
