@@ -21,55 +21,44 @@ module FitsJruby
       return @metrics.snapshot.to_json if request == STATS_COMMAND
       return 'ERROR: empty request' if request.empty?
 
-      error = validate_path(request)
+      target, error = resolve_target(request)
       return error if error
 
-      examine(examine_target(request))
+      examine(target)
     end
 
     private
 
-    def validate_path(path)
+    # Validates the request and returns [examine_target, error]. Exactly one of
+    # the two is non-nil. When no allowlist is configured (default, off) the path
+    # is unconfined and returned as-is with NO realpath resolution. When an
+    # allowlist is configured the path is canonicalized with File.realpath EXACTLY
+    # ONCE; that single canonical value is both boundary-checked and returned as
+    # the examine target, so the validated path and the opened path are identical
+    # (no symlink-swap window between two realpath calls). realpath resolves
+    # symlinks and "..". A SystemCallError (ENOENT/ELOOP/EACCES/ENOTDIR/...) is
+    # treated as not allowed (fail closed).
+    def resolve_target(path)
+      stat_error = stat_check(path)
+      return [nil, stat_error] if stat_error
+      return [path, nil] if @allowed_roots.empty?
+
+      real = File.realpath(path)
+      return [nil, "ERROR: path not allowed: #{path}"] unless @allowed_roots.any? { |root| under_root?(real, root) }
+
+      [real, nil]
+    rescue SystemCallError
+      [nil, "ERROR: path not allowed: #{path}"]
+    end
+
+    # Returns an error string if the path fails basic file-stat checks, else nil.
+    def stat_check(path)
       return "ERROR: path must be absolute: #{path}" unless path.start_with?('/')
       return "ERROR: no such file: #{path}" unless File.exist?(path)
       return "ERROR: not a regular file: #{path}" unless File.file?(path)
       return "ERROR: not readable: #{path}" unless File.readable?(path)
-      return "ERROR: path not allowed: #{path}" unless within_allowed_roots?(path)
 
       nil
-    end
-
-    # Defense-in-depth path confinement. When no roots are configured the path
-    # is unconfined (default, off). When roots are configured the requested path
-    # is canonicalized with File.realpath (resolving symlinks AND "..") and must
-    # live under at least one canonical root. The boundary check compares path
-    # components so a root of /srv/media never allows /srv/media-evil/x.
-    # The path handed to the examiner. When an allowlist is configured we
-    # examine the SAME canonical path the boundary check validated, so the
-    # validated path and the opened path cannot diverge (closing a symlink-swap
-    # gap). With no allowlist (default) the raw absolute path is examined as-is.
-    # realpath cannot fail here under normal flow (validate_path already
-    # confirmed existence and allowlist membership); a late failure is mapped to
-    # the same fail-closed error as the boundary check.
-    def examine_target(path)
-      return path if @allowed_roots.empty?
-
-      File.realpath(path)
-    rescue SystemCallError
-      path
-    end
-
-    def within_allowed_roots?(path)
-      return true if @allowed_roots.empty?
-
-      real = File.realpath(path)
-      @allowed_roots.any? { |root| under_root?(real, root) }
-    rescue SystemCallError
-      # realpath can raise ENOENT (file vanished / broken symlink after the
-      # earlier checks), ELOOP (symlink loop), EACCES, ENOTDIR, etc. Any such
-      # failure to canonicalize is treated as not allowed (fail closed) rather
-      # than crashing the worker.
-      false
     end
 
     def under_root?(path, root)
