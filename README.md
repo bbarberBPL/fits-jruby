@@ -19,7 +19,9 @@ export FITS_HOME=/path/to/fits-1.6.0
 bundle exec ruby bin/fits-server
 ```
 
-The server logs to stdout and listens on `/tmp/fits.sock` by default. Press
+The server logs to stdout and listens on a per-user socket by default
+(`$XDG_RUNTIME_DIR/fits.sock`, or `<tmpdir>/fits-<uid>/fits.sock` when
+`XDG_RUNTIME_DIR` is unset — e.g. `/tmp/fits-1000/fits.sock`). Press
 `Ctrl-C` or send `SIGTERM` to shut down cleanly.
 
 ## Environment variables
@@ -27,7 +29,7 @@ The server logs to stdout and listens on `/tmp/fits.sock` by default. Press
 | Variable              | Default          | Required | Description                                                                                  |
 |-----------------------|------------------|----------|----------------------------------------------------------------------------------------------|
 | `FITS_HOME`           | *(none)*         | **Yes**  | Path to the FITS installation directory. Must contain a `lib/` subdirectory with the FITS jars. |
-| `FITS_SOCKET_PATH`    | `/tmp/fits.sock` | No       | Filesystem path for the Unix domain socket. Use `/run/fits/fits.sock` in production.        |
+| `FITS_SOCKET_PATH`    | per-user *(see note)* | No  | Filesystem path for the Unix domain socket. Defaults to `$XDG_RUNTIME_DIR/fits.sock` when `XDG_RUNTIME_DIR` is set, otherwise `<tmpdir>/fits-<uid>/fits.sock` (e.g. `/tmp/fits-1000/fits.sock`). The server creates the socket's parent directory with mode `0700` if it does not exist. Use `/run/fits/fits.sock` in production (set explicitly via this variable). |
 | `FITS_QUEUE_CAPACITY` | `64`             | No       | Maximum number of connections that can wait in the application-level queue.                  |
 | `FITS_LOG_LEVEL`      | `info`           | No       | Logging verbosity. One of `debug`, `info`, `warn`, or `error`.                               |
 | `FITS_READ_TIMEOUT`   | `5`              | No       | Seconds to wait for a client to send a complete request line. Clients that connect and never send a newline are disconnected after this timeout, keeping the worker free. |
@@ -157,15 +159,21 @@ Each connection handles exactly one request. Open a new connection for each file
 
 #### Examples — command line
 
+The actual socket path is the per-user default described above, or whatever
+`FITS_SOCKET_PATH` is set to. Set a shell variable for convenience:
+
 ```bash
+# Set this to your actual socket path (see FITS_SOCKET_PATH default above)
+FITS_SOCKET="${FITS_SOCKET_PATH:-/path/to/fits.sock}"
+
 # Examine a file with nc
-printf '/abs/path/to/file.tif\n' | nc -U /tmp/fits.sock
+printf '/abs/path/to/file.tif\n' | nc -U "$FITS_SOCKET"
 
 # Examine a file with socat
-printf '/abs/path/to/file.tif\n' | socat - UNIX-CONNECT:/tmp/fits.sock
+printf '/abs/path/to/file.tif\n' | socat - UNIX-CONNECT:"$FITS_SOCKET"
 
 # Query live metrics
-printf 'STATS\n' | nc -U /tmp/fits.sock
+printf 'STATS\n' | nc -U "$FITS_SOCKET"
 ```
 
 #### Example — Ruby client (Sidekiq-style)
@@ -173,7 +181,10 @@ printf 'STATS\n' | nc -U /tmp/fits.sock
 ```ruby
 require "socket"
 
-xml = UNIXSocket.open("/tmp/fits.sock") do |sock|
+# Set this to the server's socket path (see FITS_SOCKET_PATH default above).
+socket_path = ENV.fetch("FITS_SOCKET_PATH", "/path/to/fits.sock")
+
+xml = UNIXSocket.open(socket_path) do |sock|
   sock.write("/abs/path/to/file.tif\n")
   sock.read
 end
@@ -186,7 +197,8 @@ Send `STATS\n` to retrieve a JSON snapshot of server health. `STATS` never runs
 FITS and does not affect the examination counters.
 
 ```bash
-printf 'STATS\n' | nc -U /tmp/fits.sock
+# Replace with your socket path (see FITS_SOCKET_PATH default above).
+printf 'STATS\n' | nc -U "${FITS_SOCKET:-/path/to/fits.sock}"
 ```
 
 Example response:
