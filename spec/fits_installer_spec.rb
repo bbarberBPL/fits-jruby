@@ -56,6 +56,19 @@ RSpec.describe FitsJruby::FitsInstaller do
     end
   end
 
+  describe '.handle_response' do
+    it 'refuses a redirect to a non-https location' do
+      response = Net::HTTPRedirection.allocate
+      def response.[](key)
+        key == 'location' ? 'http://evil.example/fits.zip' : nil
+      end
+
+      expect do
+        described_class.handle_response(response, 'https://orig.example/fits.zip', '/tmp/x.zip', 3)
+      end.to raise_error(FitsJruby::FitsInstaller::Error, /insecure redirect/)
+    end
+  end
+
   it 'raises when the download produces no usable FITS root' do
     Dir.mktmpdir do |work|
       # A zip with no lib/ dir inside
