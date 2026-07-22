@@ -1,11 +1,12 @@
 # frozen_string_literal: true
 
+require 'tmpdir'
+
 module FitsJruby
   # Reads and validates server configuration from environment variables.
   class Config
     class Error < StandardError; end
 
-    DEFAULT_SOCKET_PATH    = '/tmp/fits.sock'
     DEFAULT_QUEUE_CAPACITY = 64
     DEFAULT_LOG_LEVEL      = :info
     DEFAULT_READ_TIMEOUT   = 5
@@ -21,7 +22,10 @@ module FitsJruby
     end
 
     def socket_path
-      @env.fetch('FITS_SOCKET_PATH', DEFAULT_SOCKET_PATH)
+      explicit = @env['FITS_SOCKET_PATH']
+      return explicit if explicit && !explicit.empty?
+
+      default_socket_path
     end
 
     def queue_capacity
@@ -57,6 +61,17 @@ module FitsJruby
     end
 
     private
+
+    # Per-user socket path so the default is not a shared, predictable path on
+    # /tmp (which any local user could pre-create/squat). Prefers the systemd
+    # per-user runtime dir when present; otherwise a per-uid subdir of the
+    # system temp dir. SocketServer#start creates the parent dir 0700.
+    def default_socket_path
+      xdg = @env['XDG_RUNTIME_DIR']
+      return "#{xdg}/fits.sock" if xdg && !xdg.empty?
+
+      "#{Dir.tmpdir}/fits-#{Process.uid}/fits.sock"
+    end
 
     # Parses an integer env var, converting parse failures into Config::Error
     # with a label-specific message (e.g. "invalid queue capacity: ...").

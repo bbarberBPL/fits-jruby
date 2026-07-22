@@ -12,7 +12,7 @@ to the `fits` group.
 - OpenJDK 17 installed system-wide (see [INSTALL.md](INSTALL.md) Step 1).
 - JRuby 9.4.15.0 installed via rbenv under the service user's home, **or**
   installed to a shared prefix such as `/usr/local`.
-- FITS 1.6.0 unzipped to a stable location, e.g. `/opt/fits-1.6.0`.
+- FITS 1.6.0 unzipped to a stable location, e.g. `/opt/fits-1.6.0` (or `/usr/local/tools/fits-1.6.0`).
 - **FITS tool OS dependencies installed** — the OS packages FITS's bundled tools
   need (python3, the ExifTool Perl libraries, MediaInfo libs, the `file`
   command). The Docker image installs these automatically, but a host/systemd
@@ -43,11 +43,11 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin \
 The socket will be owned `fits:fits` with permissions `0660`. Any OS user that
 belongs to the `fits` group can connect to it.
 
-Add the application's service user (e.g. `sidekiq` or `rails`) to the `fits`
+Add the application's service user (e.g. `avi` or `deployer`) to the `fits`
 group:
 
 ```bash
-sudo usermod -aG fits sidekiq
+sudo usermod -aG fits deployer
 ```
 
 The new group membership takes effect on the next login or service restart for

@@ -46,7 +46,10 @@ module FitsJruby
       when Net::HTTPRedirection
         raise Error, "too many redirects (>#{MAX_REDIRECTS}) fetching FITS" if redirects_left <= 0
 
-        fetch_to_file(response['location'], dest, redirects_left - 1)
+        location = response['location']
+        raise Error, "refusing insecure redirect to #{location} (expected https)" unless URI(location).scheme == 'https'
+
+        fetch_to_file(location, dest, redirects_left - 1)
       when Net::HTTPSuccess
         File.open(dest, 'wb') { |f| response.read_body { |chunk| f.write(chunk) } }
       else

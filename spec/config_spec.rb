@@ -22,11 +22,35 @@ RSpec.describe FitsJruby::Config do
     expect(described_class.new(env).fits_home).to eq(@fits_home)
   end
 
-  it 'defaults the socket path, queue capacity, and log level' do
+  it 'defaults the queue capacity and log level' do
     config = described_class.new(env)
-    expect(config.socket_path).to eq('/tmp/fits.sock')
     expect(config.queue_capacity).to eq(64)
     expect(config.log_level).to eq(:info)
+  end
+
+  describe 'socket_path default (no FITS_SOCKET_PATH)' do
+    it 'uses XDG_RUNTIME_DIR when set' do
+      config = described_class.new(env('XDG_RUNTIME_DIR' => '/run/user/1000'))
+      expect(config.socket_path).to eq('/run/user/1000/fits.sock')
+    end
+
+    it 'falls back to a per-uid dir under tmpdir when XDG_RUNTIME_DIR is unset' do
+      config = described_class.new(env('XDG_RUNTIME_DIR' => nil))
+      expect(config.socket_path).to eq("#{Dir.tmpdir}/fits-#{Process.uid}/fits.sock")
+    end
+
+    it 'falls back when XDG_RUNTIME_DIR is empty' do
+      config = described_class.new(env('XDG_RUNTIME_DIR' => ''))
+      expect(config.socket_path).to eq("#{Dir.tmpdir}/fits-#{Process.uid}/fits.sock")
+    end
+  end
+
+  it 'prefers an explicit FITS_SOCKET_PATH over the runtime-dir default' do
+    config = described_class.new(env(
+                                   'FITS_SOCKET_PATH' => '/run/fits/fits.sock',
+                                   'XDG_RUNTIME_DIR' => '/run/user/1000'
+                                 ))
+    expect(config.socket_path).to eq('/run/fits/fits.sock')
   end
 
   it 'reads overrides from the environment' do

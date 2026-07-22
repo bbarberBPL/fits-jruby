@@ -2,6 +2,8 @@
 
 source 'https://rubygems.org'
 
+ruby '3.1.7', engine: 'jruby', engine_version: '9.4.15.0'
+
 gem 'rake', '~> 13.0'
 
 group :development, :test do

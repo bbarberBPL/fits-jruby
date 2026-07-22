@@ -570,6 +570,33 @@ RSpec.describe FitsJruby::SocketServer do
     server&.stop
   end
 
+  # ── Task 3: socket parent dir creation + double-start guard ────────────────
+
+  describe 'start' do
+    it 'creates the socket parent directory (0700) when missing' do
+      nested = File.join(File.dirname(@socket_path), 'nested', 'fits.sock')
+      server, = build_server(FakeExaminer.new, 'FITS_SOCKET_PATH' => nested)
+      server.start
+      begin
+        dir = File.dirname(nested)
+        expect(Dir.exist?(dir)).to be(true)
+        expect(File.stat(dir).mode & 0o777).to eq(0o700)
+      ensure
+        server&.stop
+      end
+    end
+
+    it 'raises if started while already running' do
+      server, = build_server(FakeExaminer.new)
+      server.start
+      begin
+        expect { server.start }.to raise_error(/already running/)
+      ensure
+        server&.stop
+      end
+    end
+  end
+
   # ── Fix 2: graceful drain — in-flight response is never truncated ─────────
 
   it 'delivers the complete response for an in-flight request when stop is called concurrently' do

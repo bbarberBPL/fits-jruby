@@ -103,6 +103,10 @@ If `lib/` is missing the server will refuse to start.
 > unzip fits-1.6.0.zip -d fits-1.6.0
 > ```
 
+> **System-wide alternative.** A shared, system-wide alternative is
+> `/usr/local/tools/fits-1.6.0`; use that in place of `~/tools/fits-1.6.0`
+> above if you prefer a location accessible to all users on the machine.
+
 ### FITS tool OS dependencies
 
 FITS bundles a toolbelt (ExifTool, jpylyzer, MediaInfo, `file`, and others) that
@@ -166,7 +170,10 @@ echo $FITS_HOME
 You can also export additional variables for development:
 
 ```bash
-export FITS_SOCKET_PATH=/tmp/fits.sock   # default; fine for local use
+# FITS_SOCKET_PATH defaults to a per-user path ($XDG_RUNTIME_DIR/fits.sock,
+# or /tmp/fits-<uid>/fits.sock when XDG_RUNTIME_DIR is unset). You may set it
+# explicitly if you prefer a fixed path, e.g. for scripting:
+# export FITS_SOCKET_PATH=/tmp/fits-dev.sock
 export FITS_QUEUE_CAPACITY=64            # default
 export FITS_LOG_LEVEL=info               # default
 ```
@@ -183,8 +190,12 @@ bundle exec ruby bin/fits-server
 Expected startup output (within a few seconds once the JVM warms up):
 
 ```
-I, [timestamp]  INFO -- : ready: listening on /tmp/fits.sock (queue capacity 64)
+I, [timestamp]  INFO -- : ready: listening on /tmp/fits-1000/fits.sock (queue capacity 64)
 ```
+
+*(The socket path shown is the per-user default — `$XDG_RUNTIME_DIR/fits.sock`
+when `XDG_RUNTIME_DIR` is set, otherwise `/tmp/fits-<uid>/fits.sock`. Your uid
+replaces `1000`.)*
 
 The server keeps running in the foreground. Open a second terminal for the
 next step. Press `Ctrl-C` to stop it.
@@ -197,9 +208,17 @@ In a second terminal, send a file path to the socket. The path must be
 absolute and the file must exist and be readable by the process running the
 server.
 
+The startup log shows the exact socket path. Set a shell variable for
+convenience (replace with the path printed by the server):
+
 ```bash
+# Replace with the socket path printed in the startup log above. This mirrors
+# the server's default precedence: explicit FITS_SOCKET_PATH, else
+# $XDG_RUNTIME_DIR/fits.sock, else /tmp/fits-<uid>/fits.sock.
+FITS_SOCKET="${FITS_SOCKET_PATH:-${XDG_RUNTIME_DIR:-/tmp/fits-$(id -u)}/fits.sock}"
+
 # Use a file that actually exists on your system, for example:
-printf '/etc/hostname\n' | nc -U /tmp/fits.sock
+printf '/etc/hostname\n' | nc -U "$FITS_SOCKET"
 ```
 
 If the server is working correctly the response starts with `<?xml`. If
@@ -208,7 +227,7 @@ something went wrong you will see a line beginning with `ERROR:`.
 You can also check server metrics:
 
 ```bash
-printf 'STATS\n' | nc -U /tmp/fits.sock
+printf 'STATS\n' | nc -U "$FITS_SOCKET"
 ```
 
 This returns a JSON object describing uptime, request counts, queue depth, and
