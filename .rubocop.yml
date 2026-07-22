@@ -21,9 +21,11 @@ Metrics/ClassLength:
   # audit-hardening additions (queue-drain-on-stop + worker self-heal respawn),
   # then 170 -> 185 for the atomic @running conversion and the respawn
   # backoff/cap self-heal policy, then 185 -> 190 for the on_repeated_crash
-  # seam (give-up path exits the process for the supervisor to restart).
-  # 190 reflects the actual measured size.
-  Max: 190
+  # seam (give-up path exits the process for the supervisor to restart),
+  # then 190 -> 193 for socket-dir-creation (ensure_socket_dir) and the
+  # double-start guard in start.
+  # 193 reflects the actual measured size.
+  Max: 193
 
 Metrics/MethodLength:
   Max: 25

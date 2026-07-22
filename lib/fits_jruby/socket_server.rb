@@ -45,6 +45,9 @@ module FitsJruby
     end
 
     def start
+      raise 'server already running' if @running.get
+
+      ensure_socket_dir
       remove_stale_socket
       @server = UNIXServer.new(socket_path)
       # Enforce 0660 in code rather than relying on the ambient umask, so a
@@ -286,6 +289,13 @@ module FitsJruby
         outcome = response.start_with?('<?xml') ? 'success' : 'error'
         @logger.info("examine path=#{request} outcome=#{outcome} duration_ms=#{duration_ms}")
       end
+    end
+
+    # Create the socket's parent directory 0700 if it does not exist. The
+    # default socket path lives under a per-user runtime dir (see Config); in
+    # the XDG or systemd case the dir already exists and this is a no-op.
+    def ensure_socket_dir
+      FileUtils.mkdir_p(File.dirname(socket_path), mode: 0o700)
     end
 
     def remove_stale_socket
