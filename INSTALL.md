@@ -33,7 +33,47 @@ sudo update-alternatives --config java
 
 ---
 
-## Step 2 — Install rbenv and the JRuby 9.4.15.0 runtime
+## Step 2 — Install the JRuby 9.4.15.0 runtime
+
+Two options are supported. **Option A (RVM)** matches the production systemd
+deployment and is recommended for production or production-rehearsal installs.
+**Option B (rbenv)** is lighter-weight for pure local development.
+
+### Option A — RVM (production-aligned)
+
+RVM installs per-user, under your home directory, with no root required for gems.
+The RVM wrapper binary bakes GEM_HOME/GEM_PATH/PATH into a single script that
+systemd can call directly — no login shell or `rvm-exec` wrapper needed.
+
+**Install RVM (single-user):** follow the official instructions at
+<https://rvm.io/rvm/install> — import the GPG key and run the installer as
+documented there. Do not paste a `curl | bash` one-liner from any other source.
+
+Once RVM is installed and loaded in your shell, install JRuby 9.4.15.0:
+
+```bash
+rvm install jruby-9.4.15.0
+rvm --default use jruby-9.4.15.0
+```
+
+Generate the systemd wrapper binary:
+
+```bash
+rvm wrapper jruby-9.4.15.0
+```
+
+This creates `~/.rvm/wrappers/jruby-9.4.15.0/jruby` — the path that
+`DEPLOYMENT.md`'s `ExecStart` uses (substituting the service user's home,
+`/var/fits`, for `~`).
+
+Verify:
+
+```bash
+ruby --version
+# Expected output contains: jruby 9.4.15.0
+```
+
+### Option B — rbenv (local dev)
 
 rbenv manages Ruby (and JRuby) versions without requiring root for gems.
 
@@ -171,8 +211,8 @@ You can also export additional variables for development:
 
 ```bash
 # FITS_SOCKET_PATH defaults to a per-user path ($XDG_RUNTIME_DIR/fits.sock,
-# or /tmp/fits-<uid>/fits.sock when XDG_RUNTIME_DIR is unset). You may set it
-# explicitly if you prefer a fixed path, e.g. for scripting:
+# or ${TMPDIR:-/tmp}/fits-<uid>/fits.sock when XDG_RUNTIME_DIR is unset).
+# Set it explicitly if you prefer a fixed path, e.g. for scripting:
 # export FITS_SOCKET_PATH=/tmp/fits-dev.sock
 export FITS_QUEUE_CAPACITY=64            # default
 export FITS_LOG_LEVEL=info               # default
@@ -214,8 +254,8 @@ convenience (replace with the path printed by the server):
 ```bash
 # Replace with the socket path printed in the startup log above. This mirrors
 # the server's default precedence: explicit FITS_SOCKET_PATH, else
-# $XDG_RUNTIME_DIR/fits.sock, else /tmp/fits-<uid>/fits.sock.
-FITS_SOCKET="${FITS_SOCKET_PATH:-${XDG_RUNTIME_DIR:-/tmp/fits-$(id -u)}/fits.sock}"
+# $XDG_RUNTIME_DIR/fits.sock, else ${TMPDIR:-/tmp}/fits-<uid>/fits.sock.
+FITS_SOCKET="${FITS_SOCKET_PATH:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}/fits-$(id -u)}/fits.sock}"
 
 # Use a file that actually exists on your system, for example:
 printf '/etc/hostname\n' | nc -U "$FITS_SOCKET"
