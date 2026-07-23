@@ -47,13 +47,20 @@ module FitsJruby
       return [nil, "ERROR: path not allowed: #{path}"] unless @allowed_roots.any? { |root| under_root?(real, root) }
 
       [real, nil]
-    rescue SystemCallError
+    rescue SystemCallError, ArgumentError
+      # SystemCallError: ENOENT/ELOOP/EACCES/... → not allowed (fail closed).
+      # ArgumentError: File.* rejecting the argument (e.g. embedded NUL) — must
+      # also fail closed rather than crash the worker.
       [nil, "ERROR: path not allowed: #{path}"]
     end
 
     # Returns an error string if the path fails basic file-stat checks, else nil.
     def stat_check(path)
       return "ERROR: path must be absolute: #{path}" unless path.start_with?('/')
+      # Reject a NUL byte before any File.* call: File.exist?/File.file? raise
+      # ArgumentError ("string contains null byte") on it, which is not a
+      # SystemCallError and would otherwise escape the fail-closed rescue.
+      return "ERROR: path not allowed: #{path}" if path.include?("\x00")
       return "ERROR: no such file: #{path}" unless File.exist?(path)
       return "ERROR: not a regular file: #{path}" unless File.file?(path)
       return "ERROR: not readable: #{path}" unless File.readable?(path)

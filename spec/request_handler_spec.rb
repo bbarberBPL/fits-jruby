@@ -86,6 +86,24 @@ RSpec.describe FitsJruby::RequestHandler do
     end
   end
 
+  describe 'NUL-byte paths (NEW-1)' do
+    let(:metrics) { instance_double(FitsJruby::Metrics) }
+    let(:examiner) { double('examiner') }
+
+    it 'fails closed with a structured error when an allowlist is configured' do
+      Dir.mktmpdir do |root|
+        handler = described_class.new(examiner: examiner, metrics: metrics, allowed_roots: [root])
+        expect { @result = handler.handle("#{root}/x\x00/etc/passwd") }.not_to raise_error
+        expect(@result).to start_with('ERROR: path not allowed:')
+      end
+    end
+
+    it 'never raises for a NUL path even with no allowlist' do
+      handler = described_class.new(examiner: examiner, metrics: metrics)
+      expect { handler.handle("/tmp/x\x00y") }.not_to raise_error
+    end
+  end
+
   # ── Path confinement (FITS_ALLOWED_ROOTS) ────────────────────────────────
 
   context 'with an allowlist configured' do
