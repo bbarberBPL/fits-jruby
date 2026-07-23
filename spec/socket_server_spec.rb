@@ -604,14 +604,17 @@ RSpec.describe FitsJruby::SocketServer do
     server.start
     wait_for_socket
 
-    # Kill the worker and neutralize respawn so nothing drains the queue,
-    # reproducing the "worker gone, queue full" precondition.
+    # Neutralize respawn FIRST — the killed worker's ensure invokes
+    # respawn_worker_if_crashed on its own thread, so it must already be a
+    # no-op before we kill, or an in-flight respawn spawns a consumer that
+    # drains the queue and masks the blocking-push hang this test targets.
+    def server.respawn_worker_if_crashed = nil
     worker = server.instance_variable_get(:@worker)
     worker.kill
     worker.join
-    server.instance_variable_set(:@running, java.util.concurrent.atomic.AtomicBoolean.new(true))
-    # Prevent the ensure-path respawn from creating a new consumer.
-    def server.respawn_worker_if_crashed = nil
+    # @running AtomicBoolean reset dropped: respawn is stubbed regardless of
+    # @running, so the reset was not needed for the precondition. After stop
+    # runs, @running is set false by stop itself.
 
     # Fill the bounded queue (capacity 1) so a blocking push would wedge.
     queue = server.instance_variable_get(:@queue)
