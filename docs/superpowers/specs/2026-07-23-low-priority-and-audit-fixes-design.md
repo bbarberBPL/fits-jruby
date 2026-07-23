@@ -285,34 +285,44 @@ Each finding lists: current anchor, the defect, the fix, and the test that prove
 - **Fix (reconcile the whole install path to per-user RVM):**
   1. **Prerequisite ([:13-14](DEPLOYMENT.md#L13-L14)):** replace the rbenv/shared-prefix
      bullet with "JRuby 9.4.15.0 installed via **RVM under the `fits` service
-     user's home** (`/home/fits/.rvm/…`); see [INSTALL.md](INSTALL.md) Step 2." Add
+     user's home** (`/var/fits/.rvm/…`); see [INSTALL.md](INSTALL.md) Step 2." Add
      RVM (`/usr/local/rvm/bin/rvm` or the single-user installer) to the OpenJDK-17
      prerequisite line as needed.
   2. **Service user ([Step 1, :33-38](DEPLOYMENT.md#L33-L38)):** change `useradd`
      from `--no-create-home --shell /usr/sbin/nologin` to **create a home**
-     (`--create-home --home-dir /home/fits`) so RVM can live under it. Keep the
+     (`--create-home --home-dir /var/fits`) so RVM can live under it. Keep the
      account a system account with no interactive login otherwise (a non-login
      shell is fine; RVM is invoked via its wrapper, not an interactive shell). Note
      the security trade-off explicitly: the account gains a home to host RVM, so it
      is no longer strictly home-less.
-  3. **`ProtectHome` ([:123](DEPLOYMENT.md#L123)):** `ProtectHome=yes` makes
-     `/home` inaccessible and would break an RVM-under-home wrapper. Change to
-     `ProtectHome=read-only` (or `ProtectHome=tmpfs` with a `BindReadOnlyPaths=`
-     for `/home/fits/.rvm`) so the unit can read the RVM tree while still blocking
-     writes to other homes. State which is chosen and why.
-  4. **ExecStart ([:103](DEPLOYMENT.md#L103)):** point at the **RVM wrapper**, e.g.
-     `ExecStart=/home/fits/.rvm/wrappers/jruby-9.4.15.0/jruby bin/fits-server`
+  3. **`ProtectHome` ([:123](DEPLOYMENT.md#L123)):** set `ProtectHome=read-only`.
+     Nuance to state explicitly in the doc: `ProtectHome=` only governs `/home`,
+     `/root`, and `/run/user`, so with the home at **`/var/fits`** (outside those
+     trees) it is actually **`ProtectSystem=strict` ([:122](DEPLOYMENT.md#L122))**
+     that makes `/var/fits` readable-but-not-writable — which is exactly what the
+     RVM wrapper needs (it only *reads* the RVM tree at runtime). `ProtectHome=yes`
+     would still work for `/var/fits` specifically, but we relax it to `read-only`
+     as a deliberate, documented general policy for this account (approved). If RVM
+     ever needs to *write* under the home at runtime (it should not for a
+     pre-generated wrapper), add `ReadWritePaths=/var/fits` rather than loosening
+     `ProtectSystem`.
+  4. **`ReadOnlyPaths`/read access:** because `ProtectSystem=strict` already makes
+     `/var/fits` readable, the wrapper is reachable without extra config. Do **not**
+     add `/var/fits` to `ReadWritePaths` unless a concrete runtime write need is
+     demonstrated. Keep the existing `ReadOnlyPaths=/opt/fits-1.6.0 /opt/fits-jruby`
+     ([:129](DEPLOYMENT.md#L129)) as-is.
+  5. **ExecStart ([:103](DEPLOYMENT.md#L103)):** point at the **RVM wrapper**, e.g.
+     `ExecStart=/var/fits/.rvm/wrappers/jruby-9.4.15.0/jruby bin/fits-server`
      (generate with `rvm wrapper jruby-9.4.15.0`). The wrapper sets the gem
      environment without a login shell, so `NoNewPrivileges=yes` and the rest of
-     the hardening stay intact — no `bash -lc`/`rvm-exec` shell layer.
-  5. **`ReadOnlyPaths` ([:120](DEPLOYMENT.md#L120))** and any `ProtectSystem`
-     interaction: ensure the RVM tree under the home is readable (covered by
-     `ProtectHome=read-only`, or add an explicit read path). Verify no other line
-     still implies a home-less user or a `/usr/local/bin/jruby` binary.
+     the hardening stay intact — no `bash -lc`/`rvm-exec` shell layer. Also verify
+     no other line still implies a home-less user or a `/usr/local/bin/jruby`
+     binary.
 - **Test/verification:** docs-only; no automated test. The reviewer confirms the
-  four unit directives (`useradd`, `ProtectHome`, `ExecStart`, read paths) are
-  mutually consistent with a per-user RVM-under-home install and that the wrapper
-  path is used verbatim.
+  unit directives (`useradd --create-home --home-dir /var/fits`,
+  `ProtectHome=read-only`, `ProtectSystem=strict` read access to `/var/fits`, and
+  `ExecStart` at the RVM wrapper) are mutually consistent with a per-user
+  RVM-under-home install and that the wrapper path is used verbatim.
 
 #### Doc-L — STATS counters described as "examinations" (README + DEPLOYMENT)
 - **Anchors:** [README.md:222-224](README.md#L222-L224); [DEPLOYMENT.md:267-269](DEPLOYMENT.md#L267-L269).
