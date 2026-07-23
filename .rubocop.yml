@@ -25,9 +25,10 @@ Metrics/ClassLength:
   # then 190 -> 193 for socket-dir-creation (ensure_socket_dir) and the
   # double-start guard in start, then 193 -> 196 for the ClosedQueueError
   # rescue in acceptor_loop (L1 fix) and the nil-break in drain_pending,
-  # then 196 -> 211 for verify_socket_dir! (M2 anti-squat hardening).
-  # 211 reflects the actual measured size.
-  Max: 211
+  # then 196 -> 211 for verify_socket_dir! (M2 anti-squat hardening),
+  # then 211 -> 216 for record_eof_disconnect (L4 disconnect accounting).
+  # 216 reflects the actual measured size.
+  Max: 216
 
 Metrics/MethodLength:
   Max: 25

@@ -2,6 +2,7 @@
 
 require 'socket'
 require 'tmpdir'
+require 'timeout'
 require 'json'
 require 'tempfile'
 require 'fits_jruby/config'
@@ -788,6 +789,43 @@ RSpec.describe FitsJruby::SocketServer do
     ensure
       peer.close
       sock.close
+    end
+  end
+
+  # ── L4: client disconnect accounting ────────────────────────────────────────
+
+  describe 'client disconnect accounting (L4)' do
+    it 'counts a connect-then-close as a disconnect, not a request error' do
+      server, metrics = build_server(FakeExaminer.new)
+      server.start
+      wait_for_socket
+      UNIXSocket.new(@socket_path).close # connect, send nothing, close (EOF)
+      # allow the worker to observe the EOF
+      Timeout.timeout(5) do
+        sleep 0.02 until metrics.snapshot[:client_disconnects] == 1
+      end
+      snap = metrics.snapshot
+      expect(snap[:client_disconnects]).to eq(1)
+      expect(snap[:requests_error]).to eq(0)
+    ensure
+      server&.stop
+    end
+
+    it 'still counts a genuine empty line as a request error' do
+      server, metrics = build_server(FakeExaminer.new)
+      server.start
+      wait_for_socket
+      sock = UNIXSocket.new(@socket_path)
+      sock.write("\n")
+      sock.read # read the ERROR response / EOF
+      sock.close
+      Timeout.timeout(5) do
+        sleep 0.02 until metrics.snapshot[:requests_error] == 1
+      end
+      expect(metrics.snapshot[:requests_error]).to eq(1)
+      expect(metrics.snapshot[:client_disconnects]).to eq(0)
+    ensure
+      server&.stop
     end
   end
 end

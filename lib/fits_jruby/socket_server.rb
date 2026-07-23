@@ -206,11 +206,13 @@ module FitsJruby
       nil
     end
 
-    def serve(connection)
+    def serve(connection) # rubocop:disable Metrics/AbcSize
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       raw = @reader.read_line(connection, @config.read_timeout)
-      response = @handler.handle(raw.to_s)
+      return record_eof_disconnect if raw.nil?
+
+      response = @handler.handle(raw)
       return unless write_response(connection, response)
 
       record_outcome(response)
@@ -223,6 +225,13 @@ module FitsJruby
       @logger.error("worker error: #{e.class}: #{e.message}\n#{e.backtrace&.join("\n")}")
     ensure
       safe_close(connection)
+    end
+
+    # Client connected and closed without sending a request line (EOF) —
+    # a benign disconnect (e.g. a health-check probe), not a request error (L4).
+    def record_eof_disconnect
+      @metrics.record_client_disconnect
+      @logger.debug('client disconnected before sending a request')
     end
 
     # Bounded, non-blocking write of the whole message using a monotonic

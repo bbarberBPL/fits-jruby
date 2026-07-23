@@ -24,8 +24,16 @@ module FitsJruby
       @mutex = Mutex.new
       @success = 0
       @error = 0
+      @client_disconnects = 0
       @queue_depth = 0
       @processing = false
+    end
+
+    # A client that connected and closed without sending a request line. Benign
+    # (health-check probes, aborted clients); counted separately so it does not
+    # pollute the error rate (L4).
+    def record_client_disconnect
+      @mutex.synchronize { @client_disconnects += 1 }
     end
 
     def record_success
@@ -56,6 +64,7 @@ module FitsJruby
           requests_total: @success + @error,
           requests_success: @success,
           requests_error: @error,
+          client_disconnects: @client_disconnects,
           queue_depth: @queue_depth,
           processing: @processing,
           heap_used_bytes: heap[:used],
