@@ -34,7 +34,9 @@ module FitsJruby
 
     def self.fetch_to_file(url, dest, redirects_left = MAX_REDIRECTS)
       uri = URI(url)
-      Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+      raise Error, "refusing insecure URL #{url} (expected https)" unless uri.scheme == 'https'
+
+      Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
         http.request(Net::HTTP::Get.new(uri)) do |response|
           return handle_response(response, url, dest, redirects_left)
         end

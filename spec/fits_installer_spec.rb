@@ -56,6 +56,21 @@ RSpec.describe FitsJruby::FitsInstaller do
     end
   end
 
+  describe '.fetch_to_file scheme enforcement (L11)' do
+    it 'refuses a non-https initial URL before any network call' do
+      expect(Net::HTTP).not_to receive(:start)
+      expect { described_class.fetch_to_file('http://example.com/fits.zip', '/tmp/ignored') }
+        .to raise_error(described_class::Error, /insecure URL.*expected https/)
+    end
+
+    it 'proceeds past the guard for an https URL' do
+      # Sentinel: reaching Net::HTTP.start means the guard passed.
+      allow(Net::HTTP).to receive(:start).and_raise(StopIteration)
+      expect { described_class.fetch_to_file('https://example.com/fits.zip', '/tmp/ignored') }
+        .to raise_error(StopIteration)
+    end
+  end
+
   describe '.handle_response' do
     it 'refuses a redirect to a non-https location' do
       response = Net::HTTPRedirection.allocate
