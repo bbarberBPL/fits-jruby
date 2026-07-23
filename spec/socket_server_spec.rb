@@ -598,34 +598,33 @@ RSpec.describe FitsJruby::SocketServer do
     it 'raises when the dir is world-writable (mode 0777)' do
       server = tmpdir_fallback_server
       allow(File).to receive(:lstat).and_return(fake_stat(mode: 0o777))
-      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/mode 0777/)
     end
 
     it 'raises when the dir is owned by another uid' do
       server = tmpdir_fallback_server
       allow(File).to receive(:lstat).and_return(fake_stat(uid: Process.uid + 1))
-      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/owned by uid/)
     end
 
     it 'raises when the path is a symlink' do
       server = tmpdir_fallback_server
       allow(File).to receive(:lstat).and_return(fake_stat(symlink: true))
-      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/not a directory/)
     end
   end
 
   it 'start refuses an explicit FITS_SOCKET_PATH dir even if 0777 (check is tmpdir-only)' do
-    # Explicit path → the tmpdir check must NOT apply; start proceeds.
-    server, = build_server(FakeExaminer.new) # build_server sets FITS_SOCKET_PATH
-    old = File.umask(0o000)
-    begin
-      server.start
-      wait_for_socket
-      expect(File.socket?(@socket_path)).to be(true)
-    ensure
-      File.umask(old)
-      server&.stop
-    end
+    # build_server sets FITS_SOCKET_PATH, so default_tmpdir_socket? is false and
+    # the strict 0700/owner check must NOT run. Make the parent dir 0777: if the
+    # check erroneously ran it would raise; a clean start proves it was skipped.
+    server, = build_server(FakeExaminer.new)
+    File.chmod(0o777, File.dirname(@socket_path))
+    server.start
+    wait_for_socket
+    expect(File.socket?(@socket_path)).to be(true)
+  ensure
+    server&.stop
   end
 
   # ── Task 3: socket parent dir creation + double-start guard ────────────────
