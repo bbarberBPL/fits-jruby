@@ -570,6 +570,63 @@ RSpec.describe FitsJruby::SocketServer do
     server&.stop
   end
 
+  # ── M2: refuse an unsafe tmpdir-fallback socket dir ────────────────────────
+
+  describe 'verify_socket_dir!' do
+    def fake_stat(uid: Process.uid, mode: 0o700, dir: true, symlink: false)
+      instance_double(File::Stat,
+                      uid: uid,
+                      mode: 0o40000 | mode,
+                      directory?: dir,
+                      symlink?: symlink)
+    end
+
+    def tmpdir_fallback_server
+      # No FITS_SOCKET_PATH, no XDG_RUNTIME_DIR → tmpdir fallback path.
+      metrics = FitsJruby::Metrics.new(heap_reader: -> { { used: 1, max: 2 } })
+      config = FitsJruby::Config.new('FITS_HOME' => '/unused', 'XDG_RUNTIME_DIR' => nil)
+      handler = FitsJruby::RequestHandler.new(examiner: FakeExaminer.new, metrics: metrics)
+      FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics)
+    end
+
+    it 'passes for a real directory owned by us with mode 0700' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat)
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.not_to raise_error
+    end
+
+    it 'raises when the dir is world-writable (mode 0777)' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(mode: 0o777))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/mode 0777/)
+    end
+
+    it 'raises when the dir is owned by another uid' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(uid: Process.uid + 1))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/owned by uid/)
+    end
+
+    it 'raises when the path is a symlink' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(symlink: true))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/not a directory/)
+    end
+  end
+
+  it 'start refuses an explicit FITS_SOCKET_PATH dir even if 0777 (check is tmpdir-only)' do
+    # build_server sets FITS_SOCKET_PATH, so default_tmpdir_socket? is false and
+    # the strict 0700/owner check must NOT run. Make the parent dir 0777: if the
+    # check erroneously ran it would raise; a clean start proves it was skipped.
+    server, = build_server(FakeExaminer.new)
+    File.chmod(0o777, File.dirname(@socket_path))
+    server.start
+    wait_for_socket
+    expect(File.socket?(@socket_path)).to be(true)
+  ensure
+    server&.stop
+  end
+
   # ── Task 3: socket parent dir creation + double-start guard ────────────────
 
   describe 'start' do
@@ -595,6 +652,33 @@ RSpec.describe FitsJruby::SocketServer do
         server&.stop
       end
     end
+  end
+
+  # ── H2/M1: stop must not deadlock pushing a shutdown signal onto a full
+  # queue when the worker is not consuming (crashed + in respawn backoff). ────
+  it 'completes stop without hanging when the queue is full and the worker is not consuming' do
+    server, = build_server(FakeExaminer.new, 'FITS_QUEUE_CAPACITY' => '1')
+    server.start
+    wait_for_socket
+
+    # Neutralize respawn FIRST — the killed worker's ensure invokes
+    # respawn_worker_if_crashed on its own thread, so it must already be a
+    # no-op before we kill, or an in-flight respawn spawns a consumer that
+    # drains the queue and masks the blocking-push hang this test targets.
+    def server.respawn_worker_if_crashed = nil
+    worker = server.instance_variable_get(:@worker)
+    worker.kill
+    worker.join
+    # @running AtomicBoolean reset dropped: respawn is stubbed regardless of
+    # @running, so the reset was not needed for the precondition. After stop
+    # runs, @running is set false by stop itself.
+
+    # Fill the bounded queue (capacity 1) so a blocking push would wedge.
+    queue = server.instance_variable_get(:@queue)
+    queue.push(Object.new)
+
+    finished = Thread.new { server.stop }.join(6)
+    expect(finished).not_to be_nil # stop returned; no indefinite hang
   end
 
   # ── Fix 2: graceful drain — in-flight response is never truncated ─────────

@@ -158,6 +158,29 @@ RSpec.describe FitsJruby::Config do
       .to raise_error(FitsJruby::Config::Error, /invalid write timeout/i)
   end
 
+  # ── M3: base-10 integer env parsing ───────────────────────────────────────
+
+  it 'parses a leading-zero FITS_QUEUE_CAPACITY as base-10, not octal' do
+    expect(described_class.new(env('FITS_QUEUE_CAPACITY' => '010')).queue_capacity).to eq(10)
+  end
+
+  it 'parses a leading-zero FITS_READ_TIMEOUT as base-10, not octal' do
+    expect(described_class.new(env('FITS_READ_TIMEOUT' => '030')).read_timeout).to eq(30)
+  end
+
+  it 'does not raise on FITS_WRITE_TIMEOUT=08 (would be an invalid octal digit)' do
+    expect(described_class.new(env('FITS_WRITE_TIMEOUT' => '08')).write_timeout).to eq(8)
+  end
+
+  it 'rejects a hex FITS_QUEUE_CAPACITY (base-10 only)' do
+    expect { described_class.new(env('FITS_QUEUE_CAPACITY' => '0x40')).queue_capacity }
+      .to raise_error(FitsJruby::Config::Error, /invalid queue capacity/i)
+  end
+
+  it 'still uses the Integer default when the var is unset' do
+    expect(described_class.new(env).queue_capacity).to eq(64)
+  end
+
   # ── FITS_ALLOWED_ROOTS ────────────────────────────────────────────────────
 
   it 'defaults allowed_roots to an empty array when unset' do
@@ -212,6 +235,22 @@ RSpec.describe FitsJruby::Config do
     Dir.mktmpdir do |root|
       expect { described_class.new(env('FITS_ALLOWED_ROOTS' => root)).validate! }
         .not_to raise_error
+    end
+  end
+
+  # ── M2: is the socket path the /tmp fallback (needs the strict perm check)? ─
+
+  describe '#default_tmpdir_socket?' do
+    it 'is true when neither FITS_SOCKET_PATH nor XDG_RUNTIME_DIR is set' do
+      expect(described_class.new(env('XDG_RUNTIME_DIR' => nil)).default_tmpdir_socket?).to be(true)
+    end
+
+    it 'is false when XDG_RUNTIME_DIR is set' do
+      expect(described_class.new(env('XDG_RUNTIME_DIR' => '/run/user/1000')).default_tmpdir_socket?).to be(false)
+    end
+
+    it 'is false when FITS_SOCKET_PATH is set explicitly' do
+      expect(described_class.new(env('FITS_SOCKET_PATH' => '/run/fits/fits.sock')).default_tmpdir_socket?).to be(false)
     end
   end
 end

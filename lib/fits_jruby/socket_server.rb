@@ -10,9 +10,6 @@ module FitsJruby
   # pushes them onto a bounded queue; a single worker thread drains the queue
   # serially, so only one examination runs at a time.
   class SocketServer
-    # Sentinel pushed onto the queue to signal the worker to shut down.
-    SHUTDOWN = Object.new.freeze
-
     # Self-heal policy: cap consecutive rapid respawns so a worker that dies
     # immediately and repeatedly (sustained OOM, repeated fatal error) cannot
     # thrash the JVM with unbounded thread churn + a log flood.
@@ -72,14 +69,14 @@ module FitsJruby
       end
 
       @running.set(false)
-      # Order matters: stop ACCEPTING first, then drain the worker. Closing the
+      # Order matters: stop ACCEPTING first, then signal the worker. Closing the
       # listening socket makes the acceptor's blocked accept raise IOError/EBADF
-      # so it breaks; joining it guarantees no new connection can be enqueued
-      # after the SHUTDOWN sentinel (which would otherwise be popped-past and
-      # leak, hanging its client).
+      # so it breaks; joining it guarantees no new connection is enqueued after
+      # the queue is closed. Closing the queue (never blocks) unblocks every
+      # pop — including a raced respawn — via a nil return once the queue drains.
       close_server_socket  # unblocks the acceptor (closed socket raises IOError)
       join_acceptor        # guaranteed to exit now the listening socket is gone
-      drain_worker         # push sentinel so worker exits after current serve
+      drain_worker         # close queue so worker exits after current serve
       drain_pending_connections # close anything left in the queue (fail fast)
       remove_stale_socket
       @logger.info('stopped')
@@ -94,7 +91,7 @@ module FitsJruby
     end
 
     def drain_worker
-      @queue.push(SHUTDOWN) if @worker
+      @queue.close
       return unless @worker && !@worker.join(5)
 
       @logger.warn('worker did not stop in 5s; killing')
@@ -107,7 +104,9 @@ module FitsJruby
     def drain_pending_connections
       loop do
         conn = @queue.pop(true)
-        safe_close(conn) unless conn.equal?(SHUTDOWN)
+        break if conn.nil? # closed and empty
+
+        safe_close(conn)
       end
     rescue ThreadError
       # queue empty
@@ -126,6 +125,9 @@ module FitsJruby
           @queue.push(connection)
         rescue IOError, Errno::EBADF
           break
+        rescue ClosedQueueError
+          safe_close(connection) # queue closed mid-push; close the fd
+          break
         rescue StandardError => e
           @logger.error("acceptor error: #{e.class}: #{e.message}")
         end
@@ -135,7 +137,7 @@ module FitsJruby
     def worker_loop
       loop do
         connection = @queue.pop
-        break if connection.equal?(SHUTDOWN)
+        break if connection.nil? # queue closed (shutdown) and drained
 
         begin
           @metrics.dequeue
@@ -154,24 +156,18 @@ module FitsJruby
       respawn_worker_if_crashed
     end
 
-    # A clean shutdown pops the SHUTDOWN sentinel with @running already false, so
-    # this is a no-op. Any other exit while @running is still true means the
-    # worker died unexpectedly (e.g. @queue.pop or the sentinel check raised) —
-    # the single worker is a SPOF (STATS is served by it too), so self-heal by
-    # respawning. The atomic @running guard prevents a respawn loop after stop:
-    # stop's @running.set(false) publishes a memory barrier the killed worker's
-    # ensure reliably observes, so no worker is respawned during shutdown.
+    # A clean shutdown exits via a nil pop (@running false) — this is a no-op.
+    # Any other exit while @running is true means an unexpected crash; self-heal
+    # by respawning. The atomic @running guard prevents a respawn loop: stop sets
+    # it false before the worker is killed, so the killed thread's ensure sees it
+    # and skips respawn.
     #
-    # Backoff + cap: if the worker keeps dying immediately (sustained OOM,
-    # repeated fatal error) we would otherwise churn threads and flood the log.
-    # We sleep a small increasing backoff before each respawn and, after
-    # MAX_CONSECUTIVE_RESPAWNS rapid respawns, give up. Giving up does NOT leave
-    # a half-dead process: with no worker the acceptor would keep enqueuing
-    # connections that never drain (every client hangs, STATS is dead), so we
-    # invoke the terminal action (@on_repeated_crash, hard exit by default) to
-    # let the supervisor restart a clean process. A worker that survives
-    # RESPAWN_RESET_INTERVAL is treated as recovered and resets the counter, so
-    # a later transient crash self-heals again.
+    # Backoff + cap: repeated rapid crashes (OOM, fatal error) would churn
+    # threads and flood the log. We sleep an increasing backoff and give up after
+    # MAX_CONSECUTIVE_RESPAWNS. On give-up we invoke the terminal action
+    # (@on_repeated_crash, hard exit by default) so the supervisor restarts a
+    # clean process. A worker surviving RESPAWN_RESET_INTERVAL resets the
+    # counter so a later transient crash self-heals again.
     def respawn_worker_if_crashed
       return unless @running.get
 
@@ -291,11 +287,36 @@ module FitsJruby
       end
     end
 
-    # Create the socket's parent directory 0700 if it does not exist. The
-    # default socket path lives under a per-user runtime dir (see Config); in
-    # the XDG or systemd case the dir already exists and this is a no-op.
+    # Create the socket's parent directory 0700 if missing, then (only for the
+    # /tmp/fits-<uid> fallback) verify a PRE-EXISTING dir is safe. mkdir_p sets
+    # the mode only on creation, so a squatted /tmp/fits-<uid> would otherwise
+    # be trusted silently. We run unprivileged and cannot repair a dir owned by
+    # someone else, so we refuse to start (loud, supervisor-visible) rather than
+    # bind inside an attacker-controlled directory. The XDG/systemd runtime dir
+    # and an explicit FITS_SOCKET_PATH are exempt: they are platform-owned or
+    # operator-chosen and are frequently not 0700 (e.g. /run/fits is 0755).
     def ensure_socket_dir
-      FileUtils.mkdir_p(File.dirname(socket_path), mode: 0o700)
+      dir = File.dirname(socket_path)
+      FileUtils.mkdir_p(dir, mode: 0o700)
+      verify_socket_dir!(dir) if @config.default_tmpdir_socket?
+    end
+
+    # Fail closed if the tmpdir-fallback socket dir is not a real directory
+    # owned by us with mode 0700. lstat (not stat) so a symlinked dir is
+    # rejected rather than followed.
+    def verify_socket_dir!(dir)
+      stat = File.lstat(dir)
+      reason =
+        if stat.symlink? || !stat.directory?
+          'not a directory'
+        elsif stat.uid != Process.uid
+          "owned by uid #{stat.uid}, not #{Process.uid}"
+        elsif (stat.mode & 0o777) != 0o700
+          format('mode %04o, expected 0700', stat.mode & 0o777)
+        end
+      return unless reason
+
+      raise "refusing to use socket dir #{dir}: #{reason}"
     end
 
     def remove_stale_socket

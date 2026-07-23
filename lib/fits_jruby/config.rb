@@ -28,6 +28,18 @@ module FitsJruby
       default_socket_path
     end
 
+    # True when the socket path is the /tmp/fits-<uid> fallback (no explicit
+    # FITS_SOCKET_PATH and no XDG_RUNTIME_DIR). SocketServer applies a strict
+    # ownership/permission check only in this case; the XDG runtime dir and an
+    # explicit path are trusted (platform-owned / operator-chosen).
+    def default_tmpdir_socket?
+      explicit = @env['FITS_SOCKET_PATH']
+      return false if explicit && !explicit.empty?
+
+      xdg = @env['XDG_RUNTIME_DIR']
+      xdg.nil? || xdg.empty?
+    end
+
     def queue_capacity
       integer_env('FITS_QUEUE_CAPACITY', DEFAULT_QUEUE_CAPACITY, 'queue capacity')
     end
@@ -73,10 +85,13 @@ module FitsJruby
       "#{Dir.tmpdir}/fits-#{Process.uid}/fits.sock"
     end
 
-    # Parses an integer env var, converting parse failures into Config::Error
-    # with a label-specific message (e.g. "invalid queue capacity: ...").
+    # Parses an integer env var as base-10 (so "010" is 10, not octal 8),
+    # converting parse failures into Config::Error with a label-specific
+    # message. The default is an Integer and passed through as-is because
+    # Integer(int, 10) raises "base specified for non string value".
     def integer_env(key, default, label)
-      Integer(@env.fetch(key, default))
+      raw = @env.fetch(key, default)
+      raw.is_a?(Integer) ? raw : Integer(raw, 10)
     rescue ArgumentError, TypeError
       raise Error, "invalid #{label}: #{@env[key]}"
     end
