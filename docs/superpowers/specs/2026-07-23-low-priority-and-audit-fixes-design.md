@@ -17,8 +17,10 @@ change, no change to the serial-worker model, no allowlist-semantics change.
 
 Two parallel opus discovery agents (code audit + doc audit) ran against the
 post-merge `main`. Their findings were consolidated (12 code + 3 doc) and triaged
-with the user. The user approved the **full** code scope (all four tiers) and
-**all three** doc fixes, with two design decisions recorded below. Every finding
+with the user. The user approved the **full** code scope (all four tiers) and the
+doc fixes, with two design decisions recorded below. A later request added the
+**RVM** documentation work (Doc-RVM) and reframed Doc-M to align the deployment
+docs with the production per-user-RVM-under-home model. Every finding
 in this spec was independently reproduced or line-verified against the current
 tree; the exact file:line anchors appear per finding.
 
@@ -267,19 +269,50 @@ Each finding lists: current anchor, the defect, the fix, and the test that prove
 
 ### DOCS
 
-#### Doc-M — `DEPLOYMENT.md` "install under service user's home" contradicts the hardened unit
-- **Anchor:** [DEPLOYMENT.md:13-14](DEPLOYMENT.md#L13-L14) — a two-part prerequisite
-  ("JRuby … via rbenv under the service user's home, **or** installed to a shared
-  prefix such as `/usr/local`"). The **first** alternative contradicts the rest of
-  the doc: `--no-create-home` ([:35](DEPLOYMENT.md#L35)) gives the service user no
-  home, `ProtectHome=yes` ([:123](DEPLOYMENT.md#L123)) makes any home unreadable to
-  the unit, and the ExecStart is hardcoded to `/usr/local/bin/jruby`
-  ([:103](DEPLOYMENT.md#L103)) — the second (shared-prefix) alternative.
-- **Fix:** Drop the "rbenv under the service user's home" alternative and keep only
-  the shared-prefix install at `/usr/local/bin/jruby` that the unit file already
-  requires. (Rbenv-under-home is fine for a dev checkout, but not for the hardened
-  systemd unit this doc describes.) Verify no other line still implies a
-  per-user-home JRuby for the service.
+#### Doc-M — align DEPLOYMENT.md on the production RVM (per-user, under the `fits` home) install
+- **Decision:** Production installs JRuby with **RVM, per-user under the `fits`
+  service account's home**, and the systemd unit launches JRuby via the **RVM
+  wrapper binary** (an absolute path that bakes in `GEM_HOME`/`GEM_PATH`/`PATH`, so
+  no login shell needs to be sourced). The docs must be aligned to this real
+  environment rather than to the current rbenv/`/usr/local/bin/jruby` text.
+- **Current contradiction:** [DEPLOYMENT.md:13-14](DEPLOYMENT.md#L13-L14) offers
+  "JRuby … via rbenv under the service user's home, **or** … a shared prefix such
+  as `/usr/local`", but the rest of the unit assumes a home-less shared-prefix
+  install: `--no-create-home` ([:35](DEPLOYMENT.md#L35)) gives `fits` no home,
+  `ProtectHome=yes` ([:123](DEPLOYMENT.md#L123)) hides any home from the unit, and
+  `ExecStart=/usr/local/bin/jruby` ([:103](DEPLOYMENT.md#L103)) points at a
+  shared-prefix binary. A per-user RVM install cannot work under those three.
+- **Fix (reconcile the whole install path to per-user RVM):**
+  1. **Prerequisite ([:13-14](DEPLOYMENT.md#L13-L14)):** replace the rbenv/shared-prefix
+     bullet with "JRuby 9.4.15.0 installed via **RVM under the `fits` service
+     user's home** (`/home/fits/.rvm/…`); see [INSTALL.md](INSTALL.md) Step 2." Add
+     RVM (`/usr/local/rvm/bin/rvm` or the single-user installer) to the OpenJDK-17
+     prerequisite line as needed.
+  2. **Service user ([Step 1, :33-38](DEPLOYMENT.md#L33-L38)):** change `useradd`
+     from `--no-create-home --shell /usr/sbin/nologin` to **create a home**
+     (`--create-home --home-dir /home/fits`) so RVM can live under it. Keep the
+     account a system account with no interactive login otherwise (a non-login
+     shell is fine; RVM is invoked via its wrapper, not an interactive shell). Note
+     the security trade-off explicitly: the account gains a home to host RVM, so it
+     is no longer strictly home-less.
+  3. **`ProtectHome` ([:123](DEPLOYMENT.md#L123)):** `ProtectHome=yes` makes
+     `/home` inaccessible and would break an RVM-under-home wrapper. Change to
+     `ProtectHome=read-only` (or `ProtectHome=tmpfs` with a `BindReadOnlyPaths=`
+     for `/home/fits/.rvm`) so the unit can read the RVM tree while still blocking
+     writes to other homes. State which is chosen and why.
+  4. **ExecStart ([:103](DEPLOYMENT.md#L103)):** point at the **RVM wrapper**, e.g.
+     `ExecStart=/home/fits/.rvm/wrappers/jruby-9.4.15.0/jruby bin/fits-server`
+     (generate with `rvm wrapper jruby-9.4.15.0`). The wrapper sets the gem
+     environment without a login shell, so `NoNewPrivileges=yes` and the rest of
+     the hardening stay intact — no `bash -lc`/`rvm-exec` shell layer.
+  5. **`ReadOnlyPaths` ([:120](DEPLOYMENT.md#L120))** and any `ProtectSystem`
+     interaction: ensure the RVM tree under the home is readable (covered by
+     `ProtectHome=read-only`, or add an explicit read path). Verify no other line
+     still implies a home-less user or a `/usr/local/bin/jruby` binary.
+- **Test/verification:** docs-only; no automated test. The reviewer confirms the
+  four unit directives (`useradd`, `ProtectHome`, `ExecStart`, read paths) are
+  mutually consistent with a per-user RVM-under-home install and that the wrapper
+  path is used verbatim.
 
 #### Doc-L — STATS counters described as "examinations" (README + DEPLOYMENT)
 - **Anchors:** [README.md:222-224](README.md#L222-L224); [DEPLOYMENT.md:267-269](DEPLOYMENT.md#L267-L269).
@@ -300,6 +333,34 @@ Each finding lists: current anchor, the defect, the fix, and the test that prove
   too. Add `client_disconnects` (new, from L4) to the documented STATS fields in
   **both** docs, described as benign connect-without-request events (health checks,
   aborted clients) that are counted separately and are **not** errors.
+
+#### Doc-RVM — add an RVM install path to INSTALL.md (aligned with production)
+- **Anchor:** [INSTALL.md:36-75](INSTALL.md#L36-L75) — "Step 2 — Install rbenv and
+  the JRuby 9.4.15.0 runtime" (currently rbenv-only).
+- **Rationale:** Production uses **RVM**, so the install docs must cover it; today
+  they document only rbenv, leaving the production path undocumented and DEPLOYMENT.md
+  (which now references RVM per Doc-M) without a matching INSTALL step.
+- **Fix:** Add RVM as a documented, first-class install path in Step 2. Keep rbenv
+  for local dev but present **RVM as the production-aligned option**. Concretely,
+  restructure Step 2 into two labeled alternatives — "Option A: RVM
+  (production-aligned)" and "Option B: rbenv (local dev)" — with RVM first. The RVM
+  subsection covers:
+  - Installing RVM (single-user under the account's home, matching the per-user
+    prod model) and the GPG-key prerequisite; link to the official RVM install
+    command rather than pasting a curl-to-shell one-liner verbatim, and note the
+    key-import step.
+  - `rvm install jruby-9.4.15.0` then `rvm use jruby-9.4.15.0` (and
+    `rvm --default use jruby-9.4.15.0` or a project `.ruby-version` for pinning).
+  - Generating the systemd-friendly wrapper referenced by DEPLOYMENT.md:
+    `rvm wrapper jruby-9.4.15.0` → `~/.rvm/wrappers/jruby-9.4.15.0/jruby`, with a
+    one-line pointer to DEPLOYMENT.md Step (unit) explaining the wrapper is what
+    `ExecStart` uses.
+  - The same `ruby --version` → `jruby 9.4.15.0` verification the rbenv path uses.
+- **Cross-doc consistency:** the wrapper path, JRuby version, and per-user-home
+  model in this INSTALL section must match the DEPLOYMENT.md unit (Doc-M) verbatim.
+- **Verification:** docs-only; reviewer confirms both options install the pinned
+  9.4.15.0, the RVM wrapper path matches DEPLOYMENT.md's ExecStart, and no step
+  contradicts the other doc.
 
 #### Doc-L — `INSTALL.md` hardcodes `/tmp/fits-$(id -u)` instead of honoring `$TMPDIR`
 - **Anchor:** [INSTALL.md:218](INSTALL.md#L218) — current line:
@@ -356,10 +417,14 @@ first and docs land last (docs reference the final metric/contract names).
    Touches `metrics.rb` and `socket_server.rb`. *Implementer: sonnet.*
 5. **Task 5 — L11** (installer initial-URL https assertion). Single-file, single
    guard. *Implementer: sonnet (cheapest tier — near-transcription).*
-6. **Task 6 — Docs** (DEPLOYMENT install path, README/DEPLOYMENT STATS wording +
-   `client_disconnects`, INSTALL tmpdir, operational-trade-offs note for
-   L3/NEW-2/L9, CLAUDE.md/comment verification). Docs-only; lands last so the STATS
-   field names match the shipped code. *Implementer: sonnet.*
+6. **Task 6 — Docs** (Doc-M: align DEPLOYMENT.md on the per-user RVM-under-home
+   install + wrapper ExecStart + `ProtectHome`/`useradd` reconciliation; Doc-RVM:
+   add the RVM install path to INSTALL.md Step 2, cross-consistent with the unit;
+   README/DEPLOYMENT STATS wording + `client_disconnects`; INSTALL `$TMPDIR`;
+   operational-trade-offs note for L3/NEW-2/L9; CLAUDE.md/comment verification).
+   Docs-only; lands last so the STATS field names match the shipped code, and so
+   the DEPLOYMENT wrapper path and the INSTALL RVM section are written together and
+   kept in sync. *Implementer: sonnet.*
 
 Each task: opus review after the implementer. Final opus whole-branch review before
 finishing the branch. Full verification gate: fast suite + `:integration` +
