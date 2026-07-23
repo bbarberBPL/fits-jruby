@@ -9,7 +9,7 @@ module FitsJruby
   # Owns the UNIXServer lifecycle. An acceptor thread accepts connections and
   # pushes them onto a bounded queue; a single worker thread drains the queue
   # serially, so only one examination runs at a time.
-  class SocketServer
+  class SocketServer # rubocop:disable Metrics/ClassLength
     # Self-heal policy: cap consecutive rapid respawns so a worker that dies
     # immediately and repeatedly (sustained OOM, repeated fatal error) cannot
     # thrash the JVM with unbounded thread churn + a log flood.
@@ -206,11 +206,13 @@ module FitsJruby
       nil
     end
 
-    def serve(connection)
+    def serve(connection) # rubocop:disable Metrics/AbcSize
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       raw = @reader.read_line(connection, @config.read_timeout)
-      response = @handler.handle(raw.to_s)
+      return record_eof_disconnect if raw.nil?
+
+      response = @handler.handle(raw)
       return unless write_response(connection, response)
 
       record_outcome(response)
@@ -225,47 +227,68 @@ module FitsJruby
       safe_close(connection)
     end
 
-    # Write an early-exit error response (read timeout / request too long) and
-    # record it. Best-effort: the client may already be gone.
-    def write_read_error(connection, message)
-      connection.write(message)
-      @metrics.record_error
-    rescue IOError, Errno::EPIPE, Errno::ECONNRESET
-      @metrics.record_error
+    # Client connected and closed without sending a request line (EOF) —
+    # a benign disconnect (e.g. a health-check probe), not a request error (L4).
+    def record_eof_disconnect
+      @metrics.record_client_disconnect
+      @logger.debug('client disconnected before sending a request')
     end
 
-    # Write the full response to the connection using a non-blocking loop
-    # bounded by a monotonic deadline. Returns true on success, false if the
-    # write timed out or the peer closed the connection (in which case the
-    # error metric is recorded and a warning is logged). This prevents a
-    # non-reading client from wedging the worker when the response is larger
-    # than the socket send buffer.
-    #
-    # NOTE: JRuby raises Errno::EPIPE from write_nonblock even with
-    # exception: false when the peer closes; we rescue it here so serve's
-    # error-path logic stays clean.
-    def write_response(connection, response)
+    # Bounded, non-blocking write of the whole message using a monotonic
+    # deadline. Returns :ok when fully written or :timeout when the write
+    # deadline elapses. Lets Errno::EPIPE/ECONNRESET propagate to the caller so
+    # each caller can decide how a peer-close is counted. Writes the original
+    # string on the first pass (offset 0) so a response that fits in one write
+    # is never copied (NEW-3).
+    def write_all(connection, message)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @config.write_timeout
       offset   = 0
-      total    = response.bytesize
+      total    = message.bytesize
 
       while offset < total
-        written = connection.write_nonblock(response.byteslice(offset, total - offset), exception: false)
+        chunk   = offset.zero? ? message : message.byteslice(offset, total - offset)
+        written = connection.write_nonblock(chunk, exception: false)
         if written == :wait_writable
           time_left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          if time_left <= 0 || connection.wait_writable(time_left).nil?
-            @logger.warn('write timeout for client; abandoning connection')
-            @metrics.record_error
-            return false
-          end
+          return :timeout if time_left <= 0 || connection.wait_writable(time_left).nil?
         else
           offset += written
         end
       end
-      true
+      :ok
+    end
+
+    # Write the full success response. Returns true on success, false if the
+    # write timed out or the peer closed. Preserves the prior metric behavior:
+    # a write timeout is recorded as an error here (record_outcome is skipped by
+    # serve on a false return); a peer-close mid-write is not alarmed on.
+    #
+    # NOTE: JRuby raises Errno::EPIPE from write_nonblock even with
+    # exception: false when the peer closes; we rescue it here.
+    def write_response(connection, response)
+      case write_all(connection, response)
+      when :ok
+        true
+      else # :timeout
+        @logger.warn('write timeout for client; abandoning connection')
+        @metrics.record_error
+        false
+      end
     rescue Errno::EPIPE, Errno::ECONNRESET
-      # Peer disconnected mid-write; not an error worth alarming on.
       false
+    end
+
+    # Write an early-exit error response (read timeout / request too long)
+    # through the same bounded writer so a non-reading client cannot wedge the
+    # worker (L5). Best-effort: the client may already be gone. The outcome is
+    # an error regardless of how the write ends, so record_error fires exactly
+    # once via ensure.
+    def write_read_error(connection, message)
+      write_all(connection, message)
+    rescue IOError, Errno::EPIPE, Errno::ECONNRESET
+      nil
+    ensure
+      @metrics.record_error
     end
 
     def record_outcome(response)
@@ -283,7 +306,7 @@ module FitsJruby
         @logger.debug("stats request (#{duration_ms}ms)")
       else
         outcome = response.start_with?('<?xml') ? 'success' : 'error'
-        @logger.info("examine path=#{request} outcome=#{outcome} duration_ms=#{duration_ms}")
+        @logger.info("examine path=#{request.inspect} outcome=#{outcome} duration_ms=#{duration_ms}")
       end
     end
 

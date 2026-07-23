@@ -68,4 +68,22 @@ RSpec.describe FitsJruby::Metrics do
     expect(snap[:heap_used_bytes]).to eq(1000)
     expect(snap[:heap_max_bytes]).to eq(4000)
   end
+
+  describe 'client_disconnects (L4)' do
+    subject(:metrics) { described_class.new(heap_reader: -> { { used: 1, max: 2 } }) }
+
+    it 'starts at zero and increments' do
+      expect(metrics.snapshot[:client_disconnects]).to eq(0)
+      metrics.record_client_disconnect
+      metrics.record_client_disconnect
+      expect(metrics.snapshot[:client_disconnects]).to eq(2)
+    end
+
+    it 'does not affect requests_error or requests_total' do
+      metrics.record_client_disconnect
+      snap = metrics.snapshot
+      expect(snap[:requests_error]).to eq(0)
+      expect(snap[:requests_total]).to eq(0)
+    end
+  end
 end

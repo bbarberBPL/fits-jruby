@@ -21,9 +21,11 @@ module FitsJruby
     end
 
     # Read a newline-terminated request line with a timeout and size cap.
-    # Returns the line (including the trailing newline), nil on EOF/close,
-    # raises ReadTimeout on timeout, raises RequestTooLong when the cap is
-    # exceeded.
+    # Contract: a line INCLUDING its trailing newline may be at most @max_bytes
+    # bytes. Returns the line (including the trailing newline), nil on EOF/close,
+    # raises ReadTimeout on timeout, raises RequestTooLong when @max_bytes bytes
+    # accumulate without a newline. Deterministic regardless of how the peer
+    # chunks its writes.
     def read_line(connection, timeout) # rubocop:disable Metrics/AbcSize
       buf = +''
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
@@ -34,7 +36,9 @@ module FitsJruby
 
         raise ReadTimeout unless connection.wait_readable(remaining)
 
-        chunk = connection.read_nonblock(@max_bytes - buf.length + 1, exception: false)
+        # Never read past @max_bytes: when buf is full the size check below fires
+        # before we would ever request 0 bytes.
+        chunk = connection.read_nonblock(@max_bytes - buf.length, exception: false)
         next if chunk == :wait_readable # shouldn't happen after wait_readable, but be safe
 
         return nil if chunk.nil? # EOF

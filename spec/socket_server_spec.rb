@@ -2,6 +2,7 @@
 
 require 'socket'
 require 'tmpdir'
+require 'timeout'
 require 'json'
 require 'tempfile'
 require 'fits_jruby/config'
@@ -88,7 +89,7 @@ RSpec.describe FitsJruby::SocketServer do
     server.start
     wait_for_socket
     Tempfile.create(['s', '.tif']) do |file|
-      expect(request(file.path)).to eq('ERROR: examination failed: boom')
+      expect(request(file.path)).to eq('ERROR: examination failed')
       # server still responds afterward
       expect(request('STATS')).to start_with('{')
     end
@@ -720,5 +721,111 @@ RSpec.describe FitsJruby::SocketServer do
     expect(response).to start_with('<?xml')
     expect(response).to end_with('</fits>')
     expect(response.length).to eq(large_xml.length)
+  end
+
+  describe 'write path (NEW-3/NEW-4/L5)' do
+    let(:metrics) { FitsJruby::Metrics.new(heap_reader: -> { { used: 1, max: 2 } }) }
+
+    def build_bare_server(write_timeout: 30)
+      config = FitsJruby::Config.new('FITS_HOME' => '/unused', 'XDG_RUNTIME_DIR' => nil,
+                                     'FITS_WRITE_TIMEOUT' => write_timeout.to_s)
+      handler = FitsJruby::RequestHandler.new(examiner: FakeExaminer.new, metrics: metrics)
+      FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics,
+                                  logger: Logger.new(File::NULL))
+    end
+
+    it 'writes the original response object without copying when it fits (NEW-3)' do
+      server = build_bare_server
+      client, sock = UNIXSocket.pair
+      response = "#{'<?xml ' * 10}\n"
+      expect(sock).to receive(:write_nonblock).once.and_wrap_original do |m, chunk, **kw|
+        expect(chunk).to equal(response) # same object, not a byteslice copy
+        m.call(chunk, **kw)
+      end
+      expect(server.send(:write_response, sock, response)).to be(true)
+      expect(client.read(response.bytesize)).to eq(response)
+    ensure
+      client.close
+      sock.close
+    end
+
+    it 'logs the request with control chars escaped (NEW-4)' do
+      log_io = StringIO.new
+      config = FitsJruby::Config.new('FITS_HOME' => '/unused', 'XDG_RUNTIME_DIR' => nil)
+      handler = FitsJruby::RequestHandler.new(examiner: FakeExaminer.new, metrics: metrics)
+      server = FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics,
+                                           logger: Logger.new(log_io))
+      server.send(:log_request, "/tmp/a\tb\n", '<?xml ...', Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      expect(log_io.string).to include('\t') # escaped form present
+      expect(log_io.string).not_to include("\t") # raw tab absent
+    end
+
+    it 'bounds write_read_error and records the error exactly once when the client reads (L5)' do
+      server = build_bare_server
+      client, sock = UNIXSocket.pair
+      expect { server.send(:write_read_error, sock, 'ERROR: read timeout') }
+        .to change { metrics.snapshot[:requests_error] }.by(1)
+      # Close sock to send EOF so client.read (no length) returns the buffered data.
+      # The brief used read(20) but 'ERROR: read timeout' is 19 bytes, causing a
+      # deadlock (read(n) blocks until n bytes OR EOF; sock is still open here).
+      sock.close
+      expect(client.read).to eq('ERROR: read timeout')
+    ensure
+      client.close rescue nil # rubocop:disable Style/RescueModifier
+      sock.close rescue nil   # rubocop:disable Style/RescueModifier
+    end
+
+    it 'does not block on a non-reading client and records the error once (L5)' do
+      server = build_bare_server(write_timeout: 1)
+      peer, sock = UNIXSocket.pair # peer never reads
+      big = "ERROR: #{'x' * 5_000_000}"
+      # Stub write_nonblock to never make progress so the deadline is what ends it.
+      allow(sock).to receive(:write_nonblock).and_return(:wait_writable)
+      allow(sock).to receive(:wait_writable).and_return(nil)
+      result = nil
+      thread = Thread.new { result = server.send(:write_read_error, sock, big) }
+      expect(thread.join(5)).not_to be_nil # returned within the bounded time, did not hang
+      expect(metrics.snapshot[:requests_error]).to eq(1)
+    ensure
+      peer.close
+      sock.close
+    end
+  end
+
+  # ── L4: client disconnect accounting ────────────────────────────────────────
+
+  describe 'client disconnect accounting (L4)' do
+    it 'counts a connect-then-close as a disconnect, not a request error' do
+      server, metrics = build_server(FakeExaminer.new)
+      server.start
+      wait_for_socket
+      UNIXSocket.new(@socket_path).close # connect, send nothing, close (EOF)
+      # allow the worker to observe the EOF
+      Timeout.timeout(5) do
+        sleep 0.02 until metrics.snapshot[:client_disconnects] == 1
+      end
+      snap = metrics.snapshot
+      expect(snap[:client_disconnects]).to eq(1)
+      expect(snap[:requests_error]).to eq(0)
+    ensure
+      server&.stop
+    end
+
+    it 'still counts a genuine empty line as a request error' do
+      server, metrics = build_server(FakeExaminer.new)
+      server.start
+      wait_for_socket
+      sock = UNIXSocket.new(@socket_path)
+      sock.write("\n")
+      sock.read # read the ERROR response / EOF
+      sock.close
+      Timeout.timeout(5) do
+        sleep 0.02 until metrics.snapshot[:requests_error] == 1
+      end
+      expect(metrics.snapshot[:requests_error]).to eq(1)
+      expect(metrics.snapshot[:client_disconnects]).to eq(0)
+    ensure
+      server&.stop
+    end
   end
 end

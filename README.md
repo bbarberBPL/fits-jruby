@@ -1,7 +1,7 @@
 # fits-jruby
 
 fits-jruby is a long-running JRuby process that keeps a single warm instance of
-the [Harvard FITS](https://projects.iq.harvard.edu/fits/home) file-characterization
+the [Harvard FITS](https://harvard-lts.github.io/fits) file-characterization
 tool loaded in memory and serves file-examination requests over a Unix domain
 socket. Because FITS is a pure Java program and JRuby runs on the JVM, the
 server constructs one `Fits` object at startup — the expensive step that loads
@@ -209,6 +209,7 @@ Example response:
   "requests_total": 1502,
   "requests_success": 1487,
   "requests_error": 15,
+  "client_disconnects": 4,
   "queue_depth": 3,
   "processing": true,
   "heap_used_bytes": 268435456,
@@ -216,16 +217,17 @@ Example response:
 }
 ```
 
-| Field              | Description                                                        |
-|--------------------|--------------------------------------------------------------------|
-| `uptime_seconds`   | Seconds since the server started.                                  |
-| `requests_total`   | Total examination requests received (success + error).             |
-| `requests_success` | Examinations that returned FITS XML.                               |
-| `requests_error`   | Examinations that returned an error.                               |
-| `queue_depth`      | Connections currently waiting in the application queue.            |
-| `processing`       | `true` if a FITS examination is running right now.                 |
-| `heap_used_bytes`  | JVM heap in use (bytes).                                           |
-| `heap_max_bytes`   | Maximum JVM heap available (bytes).                                |
+| Field                | Description                                                                                                                                                             |
+|----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `uptime_seconds`     | Seconds since the server started.                                                                                                                                       |
+| `requests_total`     | Total examination requests received (success + error). A *successful* `STATS` is not counted (a *failed* `STATS` is, via the error path).                                |
+| `requests_success`   | Examinations that returned FITS XML.                                                                                                                                    |
+| `requests_error`     | All error responses: protocol/validation errors (empty request, path not allowed, read timeout, request too long) **and** examination failures. A *successful* `STATS` is not counted; a *failed* `STATS` (`ERROR: stats unavailable`) is counted here. |
+| `client_disconnects` | Clients that connected and closed without sending a request (health checks, aborted clients). Not counted as errors.                                                    |
+| `queue_depth`        | Connections currently waiting in the application queue.                                                                                                                 |
+| `processing`         | `true` if a FITS examination is running right now.                                                                                                                      |
+| `heap_used_bytes`    | JVM heap in use (bytes).                                                                                                                                                |
+| `heap_max_bytes`     | Maximum JVM heap available (bytes).                                                                                                                                     |
 
 ## Concurrency and queuing
 
