@@ -296,9 +296,9 @@ Example response:
 | Field                | Meaning                                                                                                                                                                 |
 |----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `uptime_seconds`     | Seconds since the server started.                                                                                                                                       |
-| `requests_total`     | Total examinations received (success + error). Does not count `STATS` calls.                                                                                            |
+| `requests_total`     | Total examinations received (success + error). A *successful* `STATS` is not counted (a *failed* `STATS` is, via the error path).                                        |
 | `requests_success`   | Examinations that returned FITS XML.                                                                                                                                    |
-| `requests_error`     | All error responses: protocol/validation errors (empty request, path not allowed, read timeout, request too long) **and** examination failures. Does not count `STATS`. |
+| `requests_error`     | All error responses: protocol/validation errors (empty request, path not allowed, read timeout, request too long) **and** examination failures. A *successful* `STATS` is not counted; a *failed* `STATS` (`ERROR: stats unavailable`) is counted here. |
 | `client_disconnects` | Clients that connected and closed without sending a request (health checks, aborted clients). Not counted as errors.                                                    |
 | `queue_depth`        | Connections waiting in the application queue right now.                                                                                                                 |
 | `processing`         | `true` if a FITS examination is currently running.                                                                                                                      |
