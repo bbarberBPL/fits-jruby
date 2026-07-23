@@ -597,6 +597,30 @@ RSpec.describe FitsJruby::SocketServer do
     end
   end
 
+  # ── H2/M1: stop must not deadlock pushing a shutdown signal onto a full
+  # queue when the worker is not consuming (crashed + in respawn backoff). ────
+  it 'completes stop without hanging when the queue is full and the worker is not consuming' do
+    server, = build_server(FakeExaminer.new, 'FITS_QUEUE_CAPACITY' => '1')
+    server.start
+    wait_for_socket
+
+    # Kill the worker and neutralize respawn so nothing drains the queue,
+    # reproducing the "worker gone, queue full" precondition.
+    worker = server.instance_variable_get(:@worker)
+    worker.kill
+    worker.join
+    server.instance_variable_set(:@running, java.util.concurrent.atomic.AtomicBoolean.new(true))
+    # Prevent the ensure-path respawn from creating a new consumer.
+    def server.respawn_worker_if_crashed = nil
+
+    # Fill the bounded queue (capacity 1) so a blocking push would wedge.
+    queue = server.instance_variable_get(:@queue)
+    queue.push(Object.new)
+
+    finished = Thread.new { server.stop }.join(6)
+    expect(finished).not_to be_nil # stop returned; no indefinite hang
+  end
+
   # ── Fix 2: graceful drain — in-flight response is never truncated ─────────
 
   it 'delivers the complete response for an in-flight request when stop is called concurrently' do
