@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'logger'
 require_relative 'fits_jruby/config'
 require_relative 'fits_jruby/metrics'
 require_relative 'fits_jruby/request_handler'
@@ -13,12 +14,24 @@ module FitsJruby
   def self.build_server(config: Config.new, examiner: nil)
     examiner ||= FitsExaminer.new(config.fits_home)
     metrics = Metrics.new
+    logger = build_logger(config.log_level)
     handler = RequestHandler.new(
       examiner: examiner,
       metrics: metrics,
-      allowed_roots: config.allowed_roots
+      allowed_roots: config.allowed_roots,
+      logger: logger
     )
-    SocketServer.new(config: config, handler: handler, metrics: metrics)
+    SocketServer.new(config: config, handler: handler, metrics: metrics, logger: logger)
+  end
+
+  # Build the shared server logger. SocketServer keeps its own equivalent
+  # fallback for direct construction (e.g. specs) when no logger is injected;
+  # the small overlap is intentional so neither construction path can produce a
+  # nil logger.
+  def self.build_logger(level)
+    logger = Logger.new($stdout)
+    logger.level = Logger.const_get(level.to_s.upcase)
+    logger
   end
 
   # Entry point used by bin/fits-server: validate config, build the server,

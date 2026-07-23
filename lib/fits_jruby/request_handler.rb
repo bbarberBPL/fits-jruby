@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'json'
+require 'logger'
 
 module FitsJruby
   # Pure protocol logic: turns a raw request line into a response string.
@@ -8,9 +9,12 @@ module FitsJruby
   class RequestHandler
     STATS_COMMAND = 'STATS'
 
-    def initialize(examiner:, metrics:, allowed_roots: [])
+    def initialize(examiner:, metrics:, allowed_roots: [], logger: nil)
       @examiner = examiner
       @metrics = metrics
+      # Null sink by default so existing callers/tests are unaffected; the server
+      # injects a real logger via FitsJruby.build_server.
+      @logger = logger || Logger.new(File::NULL)
       # Canonicalize configured roots once so the boundary check compares
       # realpath-to-realpath. An empty list means no confinement (default).
       @allowed_roots = allowed_roots.map { |root| File.realpath(root) }
@@ -18,7 +22,7 @@ module FitsJruby
 
     def handle(raw_request)
       request = raw_request.to_s.strip
-      return @metrics.snapshot.to_json if request == STATS_COMMAND
+      return stats_response if request == STATS_COMMAND
       return 'ERROR: empty request' if request.empty?
 
       target, error = resolve_target(request)
@@ -74,10 +78,22 @@ module FitsJruby
       path.start_with?(root.end_with?(File::SEPARATOR) ? root : root + File::SEPARATOR)
     end
 
+    # STATS with a defined failure contract: if the snapshot or its
+    # serialization fails, return a stable error line and log the cause rather
+    # than crashing the worker and leaving the client with no response (L7).
+    def stats_response
+      @metrics.snapshot.to_json
+    rescue StandardError => e
+      @logger.error("stats snapshot failed: #{e.class}: #{e.message}")
+      'ERROR: stats unavailable'
+    end
+
     def examine(path)
       @examiner.examine(path)
     rescue StandardError => e
-      "ERROR: examination failed: #{e.message}"
+      # Do NOT leak internal detail to the client; log it server-side (L6).
+      @logger.error("examination failed for #{path}: #{e.class}: #{e.message}\n#{e.backtrace&.join("\n")}")
+      'ERROR: examination failed'
     end
   end
 end

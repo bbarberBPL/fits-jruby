@@ -88,7 +88,7 @@ RSpec.describe FitsJruby::SocketServer do
     server.start
     wait_for_socket
     Tempfile.create(['s', '.tif']) do |file|
-      expect(request(file.path)).to eq('ERROR: examination failed: boom')
+      expect(request(file.path)).to eq('ERROR: examination failed')
       # server still responds afterward
       expect(request('STATS')).to start_with('{')
     end

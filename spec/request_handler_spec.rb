@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'json'
+require 'logger'
+require 'stringio'
 require 'tmpdir'
 require 'fileutils'
 require 'tempfile'
@@ -59,10 +61,10 @@ RSpec.describe FitsJruby::RequestHandler do
     end
   end
 
-  it 'converts an examiner exception into an error line' do
+  it 'converts an examiner exception into a generic error line (no internal detail leaked)' do
     Tempfile.create(['sample', '.tif']) do |file|
       allow(examiner).to receive(:examine).and_raise(StandardError, 'boom')
-      expect(handler.handle("#{file.path}\n")).to eq('ERROR: examination failed: boom')
+      expect(handler.handle("#{file.path}\n")).to eq('ERROR: examination failed')
     end
   end
 
@@ -101,6 +103,40 @@ RSpec.describe FitsJruby::RequestHandler do
     it 'never raises for a NUL path even with no allowlist' do
       handler = described_class.new(examiner: examiner, metrics: metrics)
       expect { handler.handle("/tmp/x\x00y") }.not_to raise_error
+    end
+  end
+
+  describe 'error containment (L6/L7)' do
+    let(:metrics) { instance_double(FitsJruby::Metrics) }
+    let(:log_io) { StringIO.new }
+    let(:logger) { Logger.new(log_io) }
+
+    it 'returns a generic examine error and logs the detail server-side (L6)' do
+      examiner = double('examiner')
+      allow(examiner).to receive(:examine).and_raise(RuntimeError, 'secret /internal/path detail')
+      handler = described_class.new(examiner: examiner, metrics: metrics, logger: logger)
+
+      result = handler.handle('/etc/hostname')
+
+      expect(result).to eq('ERROR: examination failed')
+      expect(result).not_to include('secret')
+      expect(log_io.string).to include('RuntimeError').and include('secret /internal/path detail')
+    end
+
+    it 'returns ERROR: stats unavailable when snapshot fails and logs the cause (L7)' do
+      allow(metrics).to receive(:snapshot).and_raise(StandardError, 'heap bean exploded')
+      handler = described_class.new(examiner: double('examiner'), metrics: metrics, logger: logger)
+
+      result = handler.handle('STATS')
+
+      expect(result).to eq('ERROR: stats unavailable')
+      expect(log_io.string).to include('heap bean exploded')
+    end
+
+    it 'still returns the JSON snapshot when STATS succeeds' do
+      allow(metrics).to receive(:snapshot).and_return({ requests_total: 3 })
+      handler = described_class.new(examiner: double('examiner'), metrics: metrics, logger: logger)
+      expect(handler.handle('STATS')).to eq('{"requests_total":3}')
     end
   end
 
