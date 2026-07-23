@@ -237,4 +237,20 @@ RSpec.describe FitsJruby::Config do
         .not_to raise_error
     end
   end
+
+  # ── M2: is the socket path the /tmp fallback (needs the strict perm check)? ─
+
+  describe '#default_tmpdir_socket?' do
+    it 'is true when neither FITS_SOCKET_PATH nor XDG_RUNTIME_DIR is set' do
+      expect(described_class.new(env('XDG_RUNTIME_DIR' => nil)).default_tmpdir_socket?).to be(true)
+    end
+
+    it 'is false when XDG_RUNTIME_DIR is set' do
+      expect(described_class.new(env('XDG_RUNTIME_DIR' => '/run/user/1000')).default_tmpdir_socket?).to be(false)
+    end
+
+    it 'is false when FITS_SOCKET_PATH is set explicitly' do
+      expect(described_class.new(env('FITS_SOCKET_PATH' => '/run/fits/fits.sock')).default_tmpdir_socket?).to be(false)
+    end
+  end
 end

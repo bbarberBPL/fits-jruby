@@ -287,11 +287,36 @@ module FitsJruby
       end
     end
 
-    # Create the socket's parent directory 0700 if it does not exist. The
-    # default socket path lives under a per-user runtime dir (see Config); in
-    # the XDG or systemd case the dir already exists and this is a no-op.
+    # Create the socket's parent directory 0700 if missing, then (only for the
+    # /tmp/fits-<uid> fallback) verify a PRE-EXISTING dir is safe. mkdir_p sets
+    # the mode only on creation, so a squatted /tmp/fits-<uid> would otherwise
+    # be trusted silently. We run unprivileged and cannot repair a dir owned by
+    # someone else, so we refuse to start (loud, supervisor-visible) rather than
+    # bind inside an attacker-controlled directory. The XDG/systemd runtime dir
+    # and an explicit FITS_SOCKET_PATH are exempt: they are platform-owned or
+    # operator-chosen and are frequently not 0700 (e.g. /run/fits is 0755).
     def ensure_socket_dir
-      FileUtils.mkdir_p(File.dirname(socket_path), mode: 0o700)
+      dir = File.dirname(socket_path)
+      FileUtils.mkdir_p(dir, mode: 0o700)
+      verify_socket_dir!(dir) if @config.default_tmpdir_socket?
+    end
+
+    # Fail closed if the tmpdir-fallback socket dir is not a real directory
+    # owned by us with mode 0700. lstat (not stat) so a symlinked dir is
+    # rejected rather than followed.
+    def verify_socket_dir!(dir)
+      stat = File.lstat(dir)
+      reason =
+        if stat.symlink? || !stat.directory?
+          'not a directory'
+        elsif stat.uid != Process.uid
+          "owned by uid #{stat.uid}, not #{Process.uid}"
+        elsif (stat.mode & 0o777) != 0o700
+          format('mode %04o, expected 0700', stat.mode & 0o777)
+        end
+      return unless reason
+
+      raise "refusing to use socket dir #{dir}: #{reason}"
     end
 
     def remove_stale_socket

@@ -570,6 +570,64 @@ RSpec.describe FitsJruby::SocketServer do
     server&.stop
   end
 
+  # ── M2: refuse an unsafe tmpdir-fallback socket dir ────────────────────────
+
+  describe 'verify_socket_dir!' do
+    def fake_stat(uid: Process.uid, mode: 0o700, dir: true, symlink: false)
+      instance_double(File::Stat,
+                      uid: uid,
+                      mode: 0o40000 | mode,
+                      directory?: dir,
+                      symlink?: symlink)
+    end
+
+    def tmpdir_fallback_server
+      # No FITS_SOCKET_PATH, no XDG_RUNTIME_DIR → tmpdir fallback path.
+      metrics = FitsJruby::Metrics.new(heap_reader: -> { { used: 1, max: 2 } })
+      config = FitsJruby::Config.new('FITS_HOME' => '/unused', 'XDG_RUNTIME_DIR' => nil)
+      handler = FitsJruby::RequestHandler.new(examiner: FakeExaminer.new, metrics: metrics)
+      FitsJruby::SocketServer.new(config: config, handler: handler, metrics: metrics)
+    end
+
+    it 'passes for a real directory owned by us with mode 0700' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat)
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.not_to raise_error
+    end
+
+    it 'raises when the dir is world-writable (mode 0777)' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(mode: 0o777))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+    end
+
+    it 'raises when the dir is owned by another uid' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(uid: Process.uid + 1))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+    end
+
+    it 'raises when the path is a symlink' do
+      server = tmpdir_fallback_server
+      allow(File).to receive(:lstat).and_return(fake_stat(symlink: true))
+      expect { server.send(:verify_socket_dir!, '/tmp/fits-x') }.to raise_error(/socket dir/i)
+    end
+  end
+
+  it 'start refuses an explicit FITS_SOCKET_PATH dir even if 0777 (check is tmpdir-only)' do
+    # Explicit path → the tmpdir check must NOT apply; start proceeds.
+    server, = build_server(FakeExaminer.new) # build_server sets FITS_SOCKET_PATH
+    old = File.umask(0o000)
+    begin
+      server.start
+      wait_for_socket
+      expect(File.socket?(@socket_path)).to be(true)
+    ensure
+      File.umask(old)
+      server&.stop
+    end
+  end
+
   # ── Task 3: socket parent dir creation + double-start guard ────────────────
 
   describe 'start' do

@@ -213,6 +213,13 @@ configuring alerts:
   therefore determined by the process's group plus this mode — a permissive
   umask cannot make the socket world-connectable. Group ownership comes from the
   process's gid (`Group=fits` in the unit); the server does not `chown`.
+  Production deployments should set `FITS_SOCKET_PATH` explicitly (e.g.
+  `FITS_SOCKET_PATH=/run/fits/fits.sock` as shown in the service unit above).
+  The strict ownership/`0700` check — which refuses to boot if the socket's
+  parent directory is not owned by the server's uid with mode `0700` — applies
+  **only** to the local/dev tmpdir fallback (`/tmp/fits-<uid>/…`). A
+  platform-managed directory such as `/run/fits` (typically `0750` or `0755`
+  under `RuntimeDirectory=fits`) is accepted without complaint.
 - **Worker self-healing.** The single worker thread self-heals on unexpected
   crashes: if it dies while the server is running it is respawned automatically
   (with a short increasing backoff). This is transparent and needs no action.
