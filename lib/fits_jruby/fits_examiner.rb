@@ -40,8 +40,12 @@ module FitsJruby
       java.lang.System.setProperty('log4j2.configurationFile', config_path)
     end
 
+    # Top-level lib/*.jar only - matching FITS's own fits.sh launcher. FITS
+    # loads each tool's nested lib/<tool>/*.jar (declared via classpath-dirs
+    # in fits.xml) itself, through an isolated per-tool classloader, so those
+    # jars never need to be on the main classpath here.
     def load_fits_jars(fits_home)
-      Dir.glob(File.join(fits_home, 'lib', '**', '*.jar')).sort.each do |jar| # rubocop:disable Lint/RedundantDirGlobSort
+      Dir.glob(File.join(fits_home, 'lib', '*.jar')).sort.each do |jar| # rubocop:disable Lint/RedundantDirGlobSort
         require jar
       end
     end
