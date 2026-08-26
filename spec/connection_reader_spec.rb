@@ -54,6 +54,18 @@ RSpec.describe FitsJruby::ConnectionReader do
     expect(boundary.read_line(server, 2)).to eq("abcdefg\n")
   end
 
+  it 'decodes a multi-byte UTF-8 character correctly (e.g. an em dash in a path)' do
+    # read_nonblock tags chunks ASCII-8BIT; without forcing UTF-8 on the way
+    # out, the 3-byte em dash sequence gets interpreted byte-for-byte instead
+    # of as one character, and File.exist?/File.file? on the mistagged string
+    # then fail to match the real (UTF-8) filesystem entry.
+    line = "/abs/8bit–RGB/file.tif\n"
+    client.write(line)
+    result = reader.read_line(server, 2)
+    expect(result.encoding).to eq(Encoding::UTF_8)
+    expect(result).to eq(line)
+  end
+
   describe 'byte cap contract (L10)' do
     def deliver(chunks, max_bytes:)
       client, server = UNIXSocket.pair
