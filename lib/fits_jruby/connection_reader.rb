@@ -45,7 +45,11 @@ module FitsJruby
 
         buf << chunk
         newline_idx = buf.index("\n")
-        return buf[0..newline_idx] if newline_idx
+        # read_nonblock tags chunks ASCII-8BIT (binary); force UTF-8 on the way
+        # out so multi-byte characters (e.g. paths with an em dash) decode
+        # correctly for downstream File.* calls instead of being interpreted
+        # byte-for-byte and failing to match the actual filesystem entry.
+        return buf[0..newline_idx].force_encoding(Encoding::UTF_8) if newline_idx
 
         raise RequestTooLong if buf.length >= @max_bytes
       end

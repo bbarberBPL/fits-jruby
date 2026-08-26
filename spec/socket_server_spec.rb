@@ -61,6 +61,22 @@ RSpec.describe FitsJruby::SocketServer do
     server&.stop
   end
 
+  it 'returns examiner XML for a path containing a multi-byte character (e.g. an em dash)' do
+    # Tempfile.create's own name generator sanitizes non-ASCII out of the
+    # prefix, so build the path explicitly to keep the em dash intact.
+    server, metrics = build_server(FakeExaminer.new)
+    server.start
+    wait_for_socket
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, '8bit–RGB.tif')
+      File.write(path, 'data')
+      expect(request(path)).to eq('<?xml version="1.0"?><fits/>')
+    end
+    expect(metrics.snapshot[:requests_success]).to eq(1)
+  ensure
+    server&.stop
+  end
+
   it 'returns an error line and increments error for a bad path' do
     server, metrics = build_server(FakeExaminer.new)
     server.start
