@@ -84,6 +84,37 @@ RSpec.describe FitsJruby::FitsInstaller do
     end
   end
 
+  describe 'project tika-config.xml overlay (disables TesseractOCRParser)' do
+    def tika_config_at(home)
+      File.read(File.join(home, 'xml', 'tika', 'tika-config.xml'))
+    end
+
+    it 'installs the project tika-config.xml on a fresh install' do
+      Dir.mktmpdir do |work|
+        zip, sha = build_fake_fits_zip(work)
+        home = File.join(work, 'dest', 'fits')
+        installer = described_class.new(
+          fits_home: home, sha256: sha,
+          downloader: ->(_url, dest) { FileUtils.cp(zip, dest) }
+        )
+        installer.install!
+        expect(tika_config_at(home)).to include('TesseractOCRParser')
+      end
+    end
+
+    it 're-applies the project tika-config.xml even when FITS_HOME is already present' do
+      # This is what makes re-running `bin/setup` against an existing
+      # install (e.g. in production) sufficient to pick up the fix, without
+      # requiring a full FITS reinstall.
+      Dir.mktmpdir do |home|
+        FileUtils.mkdir_p(File.join(home, 'lib'))
+        installer = described_class.new(fits_home: home, sha256: 'unused')
+        expect(installer.install!).to eq(:present)
+        expect(tika_config_at(home)).to include('TesseractOCRParser')
+      end
+    end
+  end
+
   it 'raises when the download produces no usable FITS root' do
     Dir.mktmpdir do |work|
       # A zip with no lib/ dir inside

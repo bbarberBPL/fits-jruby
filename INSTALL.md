@@ -117,8 +117,8 @@ ruby --version
 
 The recommended way to acquire FITS is the idempotent `bin/setup` installer. It
 downloads the FITS zip, verifies its SHA-256 checksum, and unzips it to
-`FITS_HOME` if it is not already present — and is a no-op when FITS is already
-installed there. It requires `unzip` to be available:
+`FITS_HOME` if it is not already present — and skips the download when FITS is
+already installed there. It requires `unzip` to be available:
 
 ```bash
 sudo apt install -y unzip
@@ -133,6 +133,17 @@ ls ~/tools/fits-1.6.0/lib/
 ```
 
 If `lib/` is missing the server will refuse to start.
+
+`bin/setup` also installs this project's `config/tika-config.xml` into
+`$FITS_HOME/xml/tika/tika-config.xml`, overwriting FITS's own placeholder — it
+disables Tika's `TesseractOCRParser`, which otherwise spawns a `tesseract`
+process for every image FITS examines whenever `tesseract` is on `PATH`,
+bottlenecking throughput. This step runs even on the "already installed"
+fast path, so **re-running `bin/setup` against an existing FITS_HOME is
+sufficient to apply it** — no reinstall or redownload needed. This must
+happen before the systemd service starts: production hardens `FITS_HOME`
+with `ReadOnlyPaths=` (see [DEPLOYMENT.md](DEPLOYMENT.md)), so the file
+cannot be written once the service is running.
 
 > **Manual fallback.** If you prefer to install FITS by hand, download and unzip
 > the release archive yourself:
