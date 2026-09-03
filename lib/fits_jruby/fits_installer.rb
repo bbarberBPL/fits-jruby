@@ -23,7 +23,7 @@ module FitsJruby
     MAX_REDIRECTS = 5
 
     def self.default_url(version)
-      "https://github.com/harvard-lts/fits/releases/download/#{version}/fits-#{version}.zip"
+      "https://github.com/fitstool/fits/releases/download/#{version}/fits-#{version}.zip"
     end
 
     def self.default_downloader

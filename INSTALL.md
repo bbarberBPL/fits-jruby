@@ -139,7 +139,7 @@ If `lib/` is missing the server will refuse to start.
 >
 > ```bash
 > mkdir -p ~/tools && cd ~/tools
-> curl -L -O https://github.com/harvard-lts/fits/releases/download/1.6.0/fits-1.6.0.zip
+> curl -L -O https://github.com/fitstool/fits/releases/download/1.6.0/fits-1.6.0.zip
 > unzip fits-1.6.0.zip -d fits-1.6.0
 > ```
 
