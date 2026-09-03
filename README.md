@@ -1,7 +1,7 @@
 # fits-jruby
 
 fits-jruby is a long-running JRuby process that keeps a single warm instance of
-the [Harvard FITS](https://harvard-lts.github.io/fits) file-characterization
+the [Harvard FITS](https://www.fitstool.org/) file-characterization
 tool loaded in memory and serves file-examination requests over a Unix domain
 socket. Because FITS is a pure Java program and JRuby runs on the JVM, the
 server constructs one `Fits` object at startup — the expensive step that loads

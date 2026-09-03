@@ -23,7 +23,7 @@ module FitsJruby
     MAX_REDIRECTS = 5
 
     def self.default_url(version)
-      "https://github.com/harvard-lts/fits/releases/download/#{version}/fits-#{version}.zip"
+      "https://github.com/fitstool/fits/releases/download/#{version}/fits-#{version}.zip"
     end
 
     def self.default_downloader
@@ -75,15 +75,34 @@ module FitsJruby
     def install!
       if valid_install?(@fits_home)
         @logger.info("FITS already present at #{@fits_home}, skipping")
+        apply_project_tika_config!
         return :present
       end
 
       fetch_and_install
+      apply_project_tika_config!
       @logger.info("FITS installed at #{@fits_home}")
       :installed
     end
 
     private
+
+    # Overwrites FITS's bundled tika-config.xml placeholder with our own -
+    # primarily to exclude TesseractOCRParser (see config/tika-config.xml for
+    # why). Applied here, at build/deploy time, rather than at server startup:
+    # production's systemd unit hardens FITS_HOME with ReadOnlyPaths=, and
+    # FITS's TikaTool hardcodes this exact path with no env var or system
+    # property to redirect it, so it cannot be applied once the service is
+    # running. Runs unconditionally - even on the already-present fast path -
+    # so re-running `bin/setup` against an existing install still applies it.
+    def apply_project_tika_config!
+      src = File.expand_path('../../config/tika-config.xml', __dir__)
+      return unless File.exist?(src)
+
+      dest = File.join(@fits_home, 'xml', 'tika', 'tika-config.xml')
+      FileUtils.mkdir_p(File.dirname(dest))
+      FileUtils.cp(src, dest)
+    end
 
     def fetch_and_install
       Dir.mktmpdir('fits-setup') do |tmp|

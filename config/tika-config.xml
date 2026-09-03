@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Project-level Tika configuration for the FITS JRuby wrapper.
+
+  FITS's TikaTool hardcodes its config path to $FITS_HOME/xml/tika/tika-config.xml
+  (there is no env var or system property to redirect it), so this file is
+  copied into place there by bin/setup (FitsInstaller#apply_project_tika_config!)
+  at build/deploy time, overwriting the FITS-bundled placeholder. Not applied at
+  server startup: production's systemd unit hardens FITS_HOME with
+  ReadOnlyPaths=, so it must be in place before the service starts.
+
+  Excludes TesseractOCRParser: when the `tesseract` binary is present on PATH,
+  Tika's DefaultParser auto-activates it for every image mimetype it handles
+  (not just scanned/text-bearing images), spawning a tesseract process on
+  every examination and bottlenecking throughput. This exclusion removes it
+  from the parser set entirely; all other Tika parsers (metadata extraction,
+  format detection, etc.) are unaffected.
+
+  https://tika.apache.org/2.6.0/configuring.html
+-->
+<properties>
+  <parsers>
+    <parser class="org.apache.tika.parser.DefaultParser">
+      <parser-exclude class="org.apache.tika.parser.ocr.TesseractOCRParser"/>
+    </parser>
+  </parsers>
+</properties>
