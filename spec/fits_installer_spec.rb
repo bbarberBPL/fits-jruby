@@ -3,6 +3,7 @@
 require 'tmpdir'
 require 'fileutils'
 require 'digest'
+require 'logger'
 require 'fits_jruby/fits_installer'
 
 RSpec.describe FitsJruby::FitsInstaller do
@@ -111,6 +112,29 @@ RSpec.describe FitsJruby::FitsInstaller do
         installer = described_class.new(fits_home: home, sha256: 'unused')
         expect(installer.install!).to eq(:present)
         expect(tika_config_at(home)).to include('TesseractOCRParser')
+      end
+    end
+
+    it 'does not raise when FITS_HOME is read-only (e.g. a Docker image at container runtime)' do
+      # docker-entrypoint runs `bin/setup` on every container start, by which
+      # point `read_only: true` typically makes the image's rootfs read-only.
+      # The config was already baked in during the image build (when the
+      # filesystem was still writable), so a failed overwrite here must be a
+      # benign no-op, not a crash.
+      Dir.mktmpdir do |home|
+        FileUtils.mkdir_p(File.join(home, 'lib'))
+        tika_dir = File.join(home, 'xml', 'tika')
+        FileUtils.mkdir_p(tika_dir)
+        File.chmod(0o500, tika_dir) # read+traverse, no write - simulates a read-only mount
+        logger = instance_double(Logger, info: nil, warn: nil)
+        installer = described_class.new(fits_home: home, sha256: 'unused', logger: logger)
+
+        begin
+          expect { installer.install! }.not_to raise_error
+          expect(logger).to have_received(:warn).with(/tika-config\.xml/)
+        ensure
+          File.chmod(0o700, tika_dir)
+        end
       end
     end
   end

@@ -95,6 +95,13 @@ module FitsJruby
     # property to redirect it, so it cannot be applied once the service is
     # running. Runs unconditionally - even on the already-present fast path -
     # so re-running `bin/setup` against an existing install still applies it.
+    #
+    # The Docker entrypoint also runs `bin/setup` on every container start
+    # (not just at build time), by which point the image's root filesystem is
+    # typically mounted read-only (docker-compose `read_only: true`). In that
+    # case the write below fails - but the config was already correctly baked
+    # in during the image build, when the filesystem was still writable, so
+    # this is a benign no-op: log and move on instead of crashing the server.
     def apply_project_tika_config!
       src = File.expand_path('../../config/tika-config.xml', __dir__)
       return unless File.exist?(src)
@@ -102,6 +109,9 @@ module FitsJruby
       dest = File.join(@fits_home, 'xml', 'tika', 'tika-config.xml')
       FileUtils.mkdir_p(File.dirname(dest))
       FileUtils.cp(src, dest)
+    rescue Errno::EACCES, Errno::EROFS => e
+      @logger.warn("could not update #{dest}: #{e.class}: #{e.message} (skipping - " \
+                   'likely a read-only FITS_HOME; fine if already applied at build time)')
     end
 
     def fetch_and_install
